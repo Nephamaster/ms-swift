@@ -270,10 +270,13 @@ class Qwen2AudioTemplate(Template):
 
     def _encode(self, inputs: StdTemplateInputs) -> Dict[str, Any]:
         encoded = super()._encode(inputs)
+        sampling_rate = inputs.chat_template_kwargs.get('sampling_rate')
+        if sampling_rate is None:
+            sampling_rate = self.sampling_rate
         if inputs.audios:
-            audios = load_batch(inputs.audios, load_func=partial(load_audio, sampling_rate=self.sampling_rate))
+            audios = load_batch(inputs.audios, load_func=partial(load_audio, sampling_rate=sampling_rate))
             audio_inputs = self.processor.feature_extractor(
-                audios, sampling_rate=self.sampling_rate, return_attention_mask=True, return_tensors='pt')
+                audios, sampling_rate=sampling_rate, return_attention_mask=True, return_tensors='pt')
             audio_inputs['feature_attention_mask'] = audio_inputs.pop('attention_mask')
             encoded.update(audio_inputs)
         return encoded
@@ -306,6 +309,9 @@ class Qwen2VLTemplate(Template):
         self.transformers_version = version.parse(transformers.__version__)
         self.bbox_format = get_env_args('QWENVL_BBOX_FORMAT', str, 'legacy')
 
+    def _get_max_pixels(self, inputs=None):
+        return self.max_pixels
+
     def replace_tag(self, media_type: Literal['image', 'video', 'audio'], index: int,
                     inputs: StdTemplateInputs) -> List[Context]:
         from qwen_vl_utils import fetch_image, fetch_video
@@ -316,7 +322,7 @@ class Qwen2VLTemplate(Template):
             # ref: https://github.com/modelscope/ms-swift/issues/8445
             inputs.mm_processor_kwargs['do_resize'] = False
         if media_type == 'image':
-            inputs.images[index] = fetch_image({'image': inputs.images[index]}, **kwargs)
+            inputs.images[index] = fetch_image({'image': inputs.images[index], **inputs.chat_template_kwargs}, **kwargs)
             if self.mode == 'lmdeploy':
                 return ['<|vision_start|>', [-100], '<|vision_end|>']
             else:
@@ -325,7 +331,7 @@ class Qwen2VLTemplate(Template):
             if self.version == 'v3':
                 kwargs['return_video_metadata'] = True
             video = inputs.videos[index]
-            video_inputs = {'video': video}
+            video_inputs = {'video': video, **inputs.chat_template_kwargs}
             if isinstance(video, list):  # image list
                 from qwen_vl_utils import vision_process
                 video_inputs['sample_fps'] = vision_process.FPS
@@ -569,6 +575,34 @@ class Qwen3_5Template(Qwen3VLTemplate):
     def _post_encode(self, model, inputs: Dict[str, Any]) -> Dict[str, Any]:
         return Qwen2VLTemplate._post_encode(self, model, inputs)
 
+    def _swift_prepare_inputs(self, inputs: StdTemplateInputs):
+        # Normalize message content so the swift backend byte-matches Qwen3.5/Qwen3.6
+        # HF `chat_template.jinja` rendering (per-role `|trim` and canonical <think> padding).
+        # Must run BEFORE super(), because super() merges/wraps tool messages into
+        # `<tool_response>...</tool_response>` blobs using the raw inner content.
+        # See: https://github.com/modelscope/ms-swift/issues/9276
+        if isinstance(inputs.system, str):
+            inputs.system = inputs.system.strip()
+        for message in inputs.messages:
+            role = message.get('role')
+            content = message.get('content')
+            if not isinstance(content, str):
+                continue
+            if role in ('user', 'system', 'tool'):
+                # HF applies `|trim` to user/system/tool content.
+                message['content'] = content.strip()
+            elif role == 'assistant':
+                # HF applies `|trim` and re-wraps the <think>...</think> block with canonical newlines.
+                stripped = content.strip()
+                if '</think>' in stripped and '<think>' in stripped:
+                    before, _, after = stripped.partition('</think>')
+                    reasoning = before.rstrip('\n').rsplit('<think>', 1)[-1].lstrip('\n').strip()
+                    rest = after.lstrip('\n')
+                    message['content'] = f'<think>\n{reasoning}\n</think>\n\n{rest}'
+                else:
+                    message['content'] = stripped
+        super()._swift_prepare_inputs(inputs)
+
 
 register_template(
     QwenTemplateMeta(
@@ -634,6 +668,11 @@ class Qwen2_5OmniTemplate(Qwen2_5VLTemplate):
         elif self.version == 'omni_v3':
             from transformers.models.qwen3_omni_moe.processing_qwen3_omni_moe import Qwen3OmniMoeProcessorKwargs
             default = Qwen3OmniMoeProcessorKwargs._defaults
+            # Fix: WhisperFeatureExtractor defaults to truncation=True, which silently
+            # truncates audio longer than 30s. Qwen3 Omni supports variable-length audio,
+            # so we must disable truncation. See: huggingface/transformers#41473
+            default.setdefault('audio_kwargs', {})
+            default['audio_kwargs']['truncation'] = False
         self.seconds_per_chunk = default['videos_kwargs']['seconds_per_chunk']
         self.position_id_per_seconds = default['videos_kwargs']['position_id_per_seconds']
         self.use_audio_in_video = get_env_args('use_audio_in_video', bool, False)
@@ -643,25 +682,32 @@ class Qwen2_5OmniTemplate(Qwen2_5VLTemplate):
                     inputs: StdTemplateInputs) -> List[Context]:
         from qwen_omni_utils import fetch_image, fetch_video
         kwargs = {'image_patch_size': self.processor.image_processor.patch_size} if self.version == 'omni_v3' else {}
+        sampling_rate = inputs.chat_template_kwargs.get('sampling_rate')
+        if sampling_rate is None:
+            sampling_rate = self.sampling_rate
         if self.mode == 'vllm':
             # https://github.com/modelscope/ms-swift/issues/8445
             inputs.mm_processor_kwargs['do_resize'] = False
         if media_type == 'image':
-            inputs.images[index] = fetch_image({'image': inputs.images[index]}, **kwargs)
+            inputs.images[index] = fetch_image({'image': inputs.images[index], **inputs.chat_template_kwargs}, **kwargs)
             if self.version == 'omni_v2_5':
                 return ['<|vision_bos|><|IMAGE|><|vision_eos|>']
             elif self.version == 'omni_v3':
                 return ['<|vision_start|><|image_pad|><|vision_end|>']
         elif media_type == 'audio':
             if self.mode != 'vllm':
-                inputs.audios[index] = load_audio(inputs.audios[index], self.sampling_rate)
+                inputs.audios[index] = load_audio(inputs.audios[index], sampling_rate)
             if self.version == 'omni_v2_5':
                 return ['<|audio_bos|><|AUDIO|><|audio_eos|>']
             elif self.version == 'omni_v3':
                 return ['<|audio_start|><|audio_pad|><|audio_end|>']
         elif media_type == 'video':
             video = inputs.videos[index]
-            _video = fetch_video({'video': video}, **kwargs)
+            video_inputs = {'video': video, **inputs.chat_template_kwargs}
+            if isinstance(video, list):  # image list
+                from qwen_omni_utils import vision_process
+                video_inputs['sample_fps'] = vision_process.FPS
+            _video = fetch_video(video_inputs, **kwargs)
             if isinstance(_video, torch.Tensor):
                 _video = _video.to(torch.uint8)
             inputs.videos[index] = _video
@@ -670,7 +716,7 @@ class Qwen2_5OmniTemplate(Qwen2_5VLTemplate):
                 if video.startswith('http://') or video.startswith('https://'):
                     import audioread
                     video = audioread.ffdec.FFmpegAudioFile(video)
-                video = librosa.load(video, sr=self.sampling_rate)[0]
+                video = librosa.load(video, sr=sampling_rate)[0]
                 if self.mode != 'vllm':
                     inputs.audios.insert(inputs.audio_idx, (video, 'video'))
                 else:
@@ -863,6 +909,8 @@ class Qwen2_5OmniTemplate(Qwen2_5VLTemplate):
         return {'inputs_embeds': inputs_embeds}
 
     def _get_position_ids(self, inputs: Dict[str, Any]):
+        if not self.is_training:
+            return {}
         feature_attention_mask = inputs.get('feature_attention_mask')
         if feature_attention_mask is not None:
             audio_feature_lengths = torch.sum(feature_attention_mask, dim=1)
@@ -954,11 +1002,14 @@ class Qwen3ASRTemplate(Template):
 
     def _encode(self, inputs: StdTemplateInputs) -> Dict[str, Any]:
         encoded = super()._encode(inputs)
+        sampling_rate = inputs.chat_template_kwargs.get('sampling_rate')
+        if sampling_rate is None:
+            sampling_rate = self.sampling_rate
         if inputs.audios:
-            audios = load_batch(inputs.audios, load_func=partial(load_audio, sampling_rate=self.sampling_rate))
+            audios = load_batch(inputs.audios, load_func=partial(load_audio, sampling_rate=sampling_rate))
             audio_inputs = self.processor.feature_extractor(
                 audios,
-                sampling_rate=self.sampling_rate,
+                sampling_rate=sampling_rate,
                 return_attention_mask=True,
                 return_tensors='pt',
                 padding=True,

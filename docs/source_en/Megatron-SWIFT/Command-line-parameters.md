@@ -31,8 +31,8 @@
 - cross_entropy_fusion_impl: Implementation for cross-entropy loss fusion. Options are 'native' and 'te'. Defaults to None. Automatically set to 'te' for CUDA and 'native' for NPU.
 - calculate_per_token_loss: Scales the cross-entropy loss according to the number of non-padding tokens in the global batch. Defaults to None. When `task_type` is 'causal_lm' and during pretraining/fine-tuning, it defaults to True; otherwise, it defaults to False.
 - 🔥attention_backend: The attention backend to use (flash, fused, unfused, local, auto). Default is flash.
+  - If `flash_attention_3` is installed, specifying `--attention_backend flash` will prioritize using FA3. Refer to the training script [here](https://github.com/modelscope/ms-swift/tree/main/examples/train/flash_attention_3). To use flash_attention_3 for the ViT part of multimodal models, set `--attn_impl flash_attention_3`.
   - Some models may not support flash attention; you need to manually set `--attention_backend unfused/fused --padding_free false`, for example: Llama4, GPT-OSS.
-  - If `flash_attention_3` is installed, specifying `--attention_backend flash` will prioritize using FA3. Refer to the training script [here](https://github.com/modelscope/ms-swift/tree/main/examples/train/flash_attention_3).
 - optimizer: Optimizer type. Options include 'adam', 'sgd', 'muon', and 'dist_muon'. Default is 'adam'.
   - Note: This 'adam' is actually 'adamw'. See [here](https://github.com/NVIDIA/TransformerEngine/blob/d8f1e68f7c414f3e7985a8b41de4443b2f819af3/transformer_engine/pytorch/optimizers/fused_adam.py#L69-L70) for reference.
   - 'muon' and 'dist_muon' require "megatron-core>=0.16".
@@ -66,7 +66,7 @@
 - padding_free: Flatten the data in a batch to avoid data padding, thereby reducing memory usage and accelerating training. Defaults to True.
   - If you want to customize attention_mask, you can set `--padding_free false`.
   - Note: **Megatron-SWIFT training features prioritize support for padding_free format**. Unless there are special circumstances, please do not modify this value.
-- mlp_padding_free: Defaults to False. Used for padding_free optimization of mlp when padding_free is set to false. This can improve training speed and reduce memory usage while customizing attention_mask.
+- mlp_padding_free: Defaults to False. Used for padding_free optimization of mlp when padding_free is set to false. This can improve training speed and reduce memory usage while customizing attention_mask. (Temporarily incompatible with CP)
 
 
 **Learning Rate Parameters**:
@@ -77,6 +77,7 @@
 - lr_warmup_iters: Number of iterations for linear learning rate warm-up, default is 0.
 - 🔥lr_warmup_fraction: The fraction of the linear learning rate warmup phase, defaults to None.
 - 🔥min_lr: Minimum value of the learning rate, clipping any learning rate below this threshold to this value, default is 0.
+  - Note: The `min_lr` for `vit_lr` is calculated as `vit_lr * min_lr / lr`, and the same applies to `min_lr` for `aligner_lr`.
 - lr_wsd_decay_style: The decay method for the WSD annealing phase. Defaults to 'exponential'.
 - lr_wsd_decay_iters: The number of iterations for learning rate decay. Defaults to None.
 
@@ -196,7 +197,7 @@ For guidance on selecting parallelization strategies, please refer to the [Train
 - accumulate_allreduce_grads_in_fp32: Perform gradient accumulation and allreduce operations in fp32 precision. If `--bf16` is enabled and `main_params_dtype` is 'fp32', this is set to True. Otherwise, it defaults to False.
 
 **MoE Parameters**:
-- moe_router_load_balancing_type: Determines the load balancing strategy for the router. Options include "aux_loss", "seq_aux_loss", "global_aux_loss", "sinkhorn", and "none". Note that "global_aux_loss" requires "megatron-core>=0.15". Default value is None. Read from config.json.
+- moe_router_load_balancing_type: Determines the load balancing strategy for the router. Options include "aux_loss", "seq_aux_loss", "global_aux_loss", "sinkhorn", and "none". Default value is None. Read from config.json.
 - 🔥moe_router_dtype: Data type used for routing computation and expert output weighted averaging. Options are 'none', 'fp32', and 'fp64', which enhances numerical stability, especially when the number of experts is large. When used together with `moe_permute_fusion`, the performance impact is negligible. Default is 'fp32'. 'none' means no change to data type.
 - moe_token_dispatcher_type: The type of token dispatcher to use. Options include 'allgather', 'alltoall', 'flex', and 'alltoall_seq'. Default is 'alltoall'.
 - moe_enable_deepep: Enable DeepEP for efficient token dispatching and combine in MoE models. Only works with flex token dispatcher by setting `--moe_token_dispatcher_type flex`.
@@ -217,9 +218,11 @@ For guidance on selecting parallelization strategies, please refer to the [Train
 
 **MTP Parameters**
 - mtp_num_layers: Number of Multi-Token Prediction (MTP) layers. MTP extends the prediction scope at each position to multiple future tokens. This MTP implementation uses D sequential modules to sequentially predict D additional tokens. Default is None. (requires "megatron-core>=0.14")
-  - Note: The value of mtp_num_layers will not be automatically retrieved from config.json and must be set manually. You can refer to the `num_nextn_predict_layers` field in config.json to fill in this value. When using mcore-bridge, MTP weights will be loaded from safetensors files first. If not found, random initialization will be performed. (To use blockwise fp8 + mtp, please use mcore>=0.15)
+  - Note: The value of mtp_num_layers will not be automatically retrieved from config.json and must be set manually. You can refer to the `num_nextn_predict_layers`, `mtp_num_hidden_layers` field in config.json to fill in this value. When using mcore-bridge, MTP weights will be loaded from safetensors files first. If not found, random initialization will be performed. (To use blockwise fp8 + mtp, please use mcore>=0.15)
   - Multimodal MTP support: Requires installing "mcore-bridge>=1.1.0".
 - mtp_loss_scaling_factor: Scaling factor of Multi-Token Prediction (MTP) loss. We compute the average of MTP losses across all depths, then multiply it by this scaling factor to obtain the overall MTP loss, which serves as an additional training objective. Default is 0.1.
+- mtp_decoder_input_detach: Controls whether to stop gradients through decoder_input in the MTP branch. Defaults to False. When enabled, the MTP loss will not back-propagate directly through decoder_input to the embedding/ViT, but will still update the backbone via the hidden_states pathway.
+- mtp_shared_weights: Share weights across MTP layers, following the MTP scheme proposed in GLM-5. Defaults to False. For example, you can set `--mtp_num_layers 3 --mtp_shared_weights true`.
 
 **Tuner Parameters**:
 
@@ -283,6 +286,7 @@ LoRA Training:
 - rope_scaling: Parameters related to rope_scaling. Defaults to None. For format reference, see [llama3.1 config.json](https://modelscope.cn/models/LLM-Research/Meta-Llama-3.1-8B-Instruct/file/view/master?fileName=config.json&status=1), pass as a JSON string.
   - **Currently the rope_scaling module uses transformers implementation and supports all rope_scaling supported by transformers.**
 - apply_wd_to_qk_layernorm: Used for Qwen3-Next/Qwen3.5 full-parameter training to apply weight decay to qk layernorm. Defaults to False.
+- linear_decoupled_in_proj: Decouple `in_proj` in linear attention (i.e. GatedDeltaNet) into `in_proj_qkvz` and `in_proj_ba` to support FP8 training, where `in_proj_ba` is still trained in original precision. Refer to [this example](https://github.com/modelscope/ms-swift/blob/main/examples/models/qwen3_5/fp8.sh).
 - enable_dft_loss: Whether to use [DFT](https://arxiv.org/abs/2508.05629) (Dynamic Fine-Tuning) loss in SFT training. Defaults to False.
 - enable_channel_loss: Enable channel loss. Defaults to `False`. You need to prepare a "channel" field in the dataset, and ms-swift will group and calculate loss based on this field (if the "channel" field is not prepared, it will be classified under the default `None` channel). For dataset format, refer to [channel loss](../Customization/Custom-dataset.md#channel-loss). Channel loss is compatible with techniques such as packing/padding_free/loss_scale.
 - 🔥task_type: Defaults to 'causal_lm'. Options are 'causal_lm', 'seq_cls', 'embedding', and 'generative_reranker'.
@@ -298,7 +302,7 @@ Megatron training parameters are inherited from Megatron parameters and basic pa
 
 - add_version: Adds a directory `<version>-<timestamp>` to `output_dir` to prevent overwriting weights, default is True.
 - 🔥create_checkpoint_symlink: Creates additional checkpoint symlinks to facilitate writing automated training scripts. The symlink paths for `best_model` and `last_model` are `f'{output_dir}/best'` and `f'{output_dir}/last'` respectively.
-- 🔥packing: Use the `padding_free` method to pack data samples of different lengths into samples of **approximately** uniform length (packing ensures that complete sequences are not split), achieving load balancing across nodes and processes during training (preventing long texts from slowing down short text training), thereby improving GPU utilization and maintaining stable memory usage. When using `--attention_backend flash`, it ensures that different sequences within packed samples remain independent and invisible to each other (except for Qwen3-Next, which contains linear-attention). This parameter defaults to `False`. All training tasks in Megatron-SWIFT support this parameter. Note: **packing will reduce the number of dataset samples, please adjust gradient accumulation steps and learning rate accordingly**.
+- 🔥packing: Use the `padding_free` method to pack data samples of different lengths into samples of **approximately** uniform length (packing ensures that complete sequences are not split), achieving load balancing across nodes and processes during training (preventing long texts from slowing down short text training), thereby improving GPU utilization and maintaining stable memory usage. When using `--attention_backend flash`, it ensures that different sequences within packed samples remain independent and invisible to each other (Except for Qwen3-Next, which contains linear attention (however, Qwen3.5 is supported).). This parameter defaults to `False`. All training tasks in Megatron-SWIFT support this parameter. Note: **packing will reduce the number of dataset samples, please adjust gradient accumulation steps and learning rate accordingly**.
 - packing_length: the length to use for packing. Defaults to None, in which case it is set to max_length.
 - packing_num_proc: Number of processes for packing, default is 1. Note that different values of `packing_num_proc` will result in different packed datasets. (This parameter does not take effect during streaming packing). Usually there is no need to modify this value, as packing speed is much faster than tokenization speed.
 - streaming: Stream data loading and processing, default is False. (The shuffling of streaming datasets is not thorough, which may lead to severe loss fluctuations.)
