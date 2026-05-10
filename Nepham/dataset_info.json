@@ -8,11 +8,23 @@
         }
     },
     {
+        "dataset_name": "34m_mix",
+        "dataset_path": "dataset/34m_mix.jsonl",
+        "columns": {
+            "src": "query",
+            "tgt": "response"
+        }
+    },
+    {
         "dataset_name": "csc_mix",
         "dataset_path": "dataset/csc_mix.jsonl",
         "columns": {
             "src": "query",
             "tgt": "response"
         }
+    },
+    {
+        "dataset_name": "SFT",
+        "dataset_path": "dataset/SFT.jsonl"
     }
 ]
