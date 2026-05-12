@@ -24,12 +24,12 @@ swift sft \
     --target_modules all-linear \
     --deepspeed zero2 \
     --num_train_epochs 1 \
-    --per_device_train_batch_size 32 \
+    --per_device_train_batch_size 16 \
     --per_device_eval_batch_size 1 \
     --gradient_accumulation_steps 1 \
     --learning_rate 1e-4 \
-    --eval_steps 500 \
-    --save_steps 500 \
+    --eval_steps 100 \
+    --save_steps 100 \
     --save_total_limit 8 \
     --logging_steps 10 \
     --max_length 2048 \
