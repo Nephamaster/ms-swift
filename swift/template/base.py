@@ -202,6 +202,11 @@ class Template(ProcessorMixin):
     @property
     def agent_template(self):
         from swift.agent_template import agent_template_map
+        if self._agent_template is None:
+            raise ValueError(
+                f'Failed to automatically match an agent_template for template "{self.template_meta.template_type}". '
+                f'Please specify it manually via `--agent_template`. '
+                f'Available options: {list(agent_template_map.keys())}.')
         if self._agent_template not in self._agent_template_cache:
             self._agent_template_cache[self._agent_template] = agent_template_map[self._agent_template]()
         return self._agent_template_cache[self._agent_template]
@@ -230,13 +235,21 @@ class Template(ProcessorMixin):
         logger.info(f'agent_template: {self._agent_template}')
         if self.model_meta.is_multimodal:
             logger.info(f'norm_bbox: {self.norm_bbox}')
-        tokenizer = self.tokenizer
+        self._init_placeholder_tokens()
+        self.template_meta.init(self.tokenizer)
+        self.init_env_args()
 
+    def _init_placeholder_tokens(self):
+        for mm_type in ['image', 'video', 'audio']:
+            mm_token = getattr(self.processor, f'{mm_type}_token', None)
+            mm_token_id = getattr(self.processor, f'{mm_type}_token_id', None)
+            if mm_token_id is not None and mm_token_id not in self.placeholder_tokens:
+                self.placeholder_tokens.append(mm_token_id)
+            elif mm_token is not None and mm_token not in self.placeholder_tokens:
+                self.placeholder_tokens.append(mm_token)
         for i, token in enumerate(self.placeholder_tokens):
             if isinstance(token, str):
-                self.placeholder_tokens[i] = tokenizer.convert_tokens_to_ids(token)
-        self.template_meta.init(tokenizer)
-        self.init_env_args()
+                self.placeholder_tokens[i] = self.tokenizer.convert_tokens_to_ids(token)
 
     def _get_model(self):
         if self.model is not None:
@@ -297,9 +310,9 @@ class Template(ProcessorMixin):
                 bbox[2 * i + 1] = int(round(y / height * norm_height))
 
     def _preprocess_function_call(self, inputs: StdTemplateInputs) -> None:
-        agent_template = self.agent_template
-        agent_template.template_meta = self.template_meta  # for hermes
         if inputs.tools:
+            agent_template = self.agent_template
+            agent_template.template_meta = self.template_meta  # for hermes
             if isinstance(inputs.tools, str):
                 inputs.tools = agent_template._parse_json(inputs.tools)
                 if not isinstance(inputs.tools, (list, tuple)):
@@ -314,11 +327,13 @@ class Template(ProcessorMixin):
         messages = inputs.messages
         while i < len(messages):
             if messages[i]['role'] == 'tool_call':
+                agent_template = self.agent_template
+                agent_template.template_meta = self.template_meta  # for hermes
                 i_start = i
                 while i + 1 < len(messages) and messages[i + 1]['role'] == 'tool_call':
                     i += 1
                 tool_call_msgs = messages[i_start:i + 1]
-                tool_content = self.agent_template._format_tool_calls(tool_call_msgs)
+                tool_content = agent_template._format_tool_calls(tool_call_msgs)
                 merged_message = {'role': 'assistant', 'content': tool_content}
                 # Preserve loss/loss_scale fields from the first tool_call message.
                 for msg in tool_call_msgs:
@@ -417,10 +432,12 @@ class Template(ProcessorMixin):
         inputs.generate_mode = generate_mode
 
     @staticmethod
-    def _extend_tokens(
-            input_ids: List[int], labels: Optional[List[int]], loss_scale: Optional[List[float]],
-            replace_idx_list: List[int],
-            get_new_tokens: Callable[[int], List[int]]) -> Tuple[List[int], Optional[List[int]], Optional[List[float]]]:
+    def _extend_tokens(input_ids: List[int],
+                       labels: Optional[List[int]],
+                       loss_scale: Optional[List[float]],
+                       replace_idx_list: List[int],
+                       get_new_tokens: Callable[[int], List[int]],
+                       mm_mask: Optional[List[bool]] = None):
         added_tokens_len = 0
         for i, idx in enumerate(replace_idx_list):
             try:
@@ -436,7 +453,11 @@ class Template(ProcessorMixin):
                 scale_idx = loss_scale[idx + added_tokens_len]
                 loss_scale = loss_scale[:idx + added_tokens_len] + [scale_idx] * token_len + loss_scale[added_tokens_len
                                                                                                         + idx + 1:]
+            if mm_mask:
+                mm_mask = mm_mask[:idx + added_tokens_len] + [True] * token_len + mm_mask[added_tokens_len + idx + 1:]
             added_tokens_len += token_len - 1
+        if mm_mask is not None:
+            return input_ids, labels, loss_scale, mm_mask
         return input_ids, labels, loss_scale
 
     def forward_context(self, model, inputs):
@@ -653,9 +674,9 @@ class Template(ProcessorMixin):
             keys.update(r.keys())
             length.append(r['length'])
         for key in keys:
-            if key == 'position_ids' and is_3d_position_ids:
+            if key == 'position_ids' and is_3d_position_ids or key in {'mm_token_type_ids'}:
                 packed[key] = torch.cat([x.get(key) for x in row], dim=-1)
-            elif key in {'input_ids', 'labels', 'loss_scale', 'position_ids'}:
+            elif key in {'input_ids', 'labels', 'loss_scale', 'position_ids', 'token_type_ids'}:
                 packed[key] = sum((x.get(key) or [] for x in row), start=[])
             elif key == 'channel':
                 packed[key] = [x.get(key) for x in row]
@@ -1096,6 +1117,7 @@ class Template(ProcessorMixin):
     def _jinja_encode(self, inputs: StdTemplateInputs):
         messages = inputs.messages.copy()
         if inputs.system is None:
+            # Fix default_system passed from command line being ignored.
             inputs.system = self.template_meta.default_system
         if inputs.system is not None:
             messages.insert(0, {'role': 'system', 'content': inputs.system})
@@ -1285,11 +1307,13 @@ class Template(ProcessorMixin):
                 # and here we avoid adding <|user|>.
                 response_content = response
                 if not isinstance(response_content, str):
-                    if isinstance(response, list):
-                        token_ids = response
+                    if isinstance(response_content, list) and response_content and isinstance(
+                            response_content[-1], str):
+                        response_content = response_content[-1]
                     else:
-                        token_ids = response['token_ids']
-                    response_content = self.tokenizer.decode(token_ids[-20:])
+                        token_ids = response_content if isinstance(response_content,
+                                                                   list) else response_content['token_ids']
+                        response_content = self.tokenizer.decode(token_ids[-20:])
                 endswith_stop_words = any(
                     response_content.endswith(stop_word) for stop_word in template_meta.stop_words
                     if isinstance(stop_word, str))
@@ -1327,7 +1351,7 @@ class Template(ProcessorMixin):
             answer_len = 0
         return res_context_list, loss_scale_list, answer_len
 
-    def _truncate(self, input_ids: List[int], labels: Optional[List[int]], loss_scale: Optional[List[float]],
+    def _truncate(self, input_ids: List[int], labels: Optional[List[int]], encoded,
                   truncation_strategy: Literal['left', 'right']):
         placeholder_tokens = torch.tensor(self.placeholder_tokens)
         input_ids_tensor = torch.tensor(input_ids)
@@ -1344,10 +1368,15 @@ class Template(ProcessorMixin):
         if labels is not None:
             labels = torch.tensor(labels)[protected].tolist()
             labels[0] = -100
+        loss_scale = encoded.get('loss_scale')
         if loss_scale is not None:
             loss_scale = torch.tensor(loss_scale)[protected].tolist()
             loss_scale[0] = 0
-        return input_ids, labels, loss_scale
+            encoded['loss_scale'] = loss_scale
+        mm_token_type_ids = encoded.get('mm_token_type_ids')
+        if mm_token_type_ids is not None:
+            encoded['mm_token_type_ids'] = mm_token_type_ids[protected]
+        return input_ids, labels
 
     @staticmethod
     def _get_length(input_ids, labels):
@@ -1377,12 +1406,11 @@ class Template(ProcessorMixin):
             encoded = self._encode(inputs)
         input_ids = encoded.get('input_ids')
         labels = encoded.get('labels')
-        loss_scale = encoded.get('loss_scale')
         length = self._get_length(input_ids, labels)
         if self.max_length is not None and length > self.max_length:
             if self.truncation_strategy in {'right', 'left'}:
-                input_ids, labels, loss_scale = self._truncate(
-                    input_ids, labels, loss_scale, truncation_strategy=self.truncation_strategy)
+                input_ids, labels = self._truncate(
+                    input_ids, labels, encoded, truncation_strategy=self.truncation_strategy)
                 length = self._get_length(input_ids, labels)
             elif self.truncation_strategy == 'raise':
                 raise MaxLengthError(f'Current length of row({length}) is larger'
@@ -1414,7 +1442,6 @@ class Template(ProcessorMixin):
             encoded.pop('loss_scale', None)
         else:
             encoded['labels'] = labels
-            encoded['loss_scale'] = loss_scale
         return encoded
 
     def _encode(self, inputs: StdTemplateInputs) -> Dict[str, Any]:
@@ -1481,6 +1508,8 @@ class Template(ProcessorMixin):
                 encoded['loss_scale'] += [0] * padding_len
             if encoded.get('length') is not None:
                 encoded['length'] += padding_len
+            if encoded.get('mm_token_type_ids') is not None:
+                encoded['mm_token_type_ids'] = F.pad(encoded['mm_token_type_ids'], (0, padding_len), value=0)
 
     def debug_logger(self, inputs):
         if not strtobool(os.getenv('SWIFT_DEBUG', 'false')):
@@ -1816,9 +1845,10 @@ class Template(ProcessorMixin):
                 encoded['position_ids'] = list(range(len(val)))
 
         res = {}
+        gather_keys = ['labels', 'loss_scale', 'position_ids', 'token_type_ids', 'mm_token_type_ids']
         if self.padding_free:
             assert len(batch) == 1, f'batch: {batch}'
-            for k in ['input_ids', 'labels', 'position_ids', 'loss_scale', 'channel']:
+            for k in ['input_ids', 'channel'] + gather_keys:
                 v = batch[0].get(k)
                 if v is not None:
                     res[k] = v if k == 'channel' else [v]
@@ -1834,25 +1864,21 @@ class Template(ProcessorMixin):
             if any(channel):
                 res['channel'] = channel
 
-            for key in ['labels', 'loss_scale', 'position_ids', 'token_type_ids']:
+            for key in gather_keys:
                 val = [b[key] for b in batch if b.get(key) is not None]
                 if val:
                     res[key] = val
 
-        keys = [
+        pad_keys = [
             'input_ids',
             'inputs_embeds',
             'attention_mask',
-            'labels',
-            'loss_scale',
-            'position_ids',
-            'token_type_ids',
             'attention_mask_2d',
-        ]
-        pad_values = [self.tokenizer.pad_token_id, 0., 0, -100, 0., 0., 0, 0]
+        ] + gather_keys
+        pad_values = [self.tokenizer.pad_token_id, 0., 0, 0] + [-100, 0., 0, 0, 0]
         # Convert to tensor and remove unnecessary dimensions.
         seq_lens = None
-        for key in keys:
+        for key in pad_keys:
             if key not in res:
                 continue
             for i, val in enumerate(res[key]):
@@ -1892,7 +1918,7 @@ class Template(ProcessorMixin):
                     res['attention_mask'][i, :, :, seq_len:] = 0
                 res['attention_mask'] = ~res['attention_mask']
 
-        for key, pad_value in zip(keys, pad_values):
+        for key, pad_value in zip(pad_keys, pad_values):
             if key not in res:
                 continue
             if self.use_megatron and not self.padding_free and key == 'attention_mask':
@@ -1948,18 +1974,20 @@ class Template(ProcessorMixin):
 
         return result
 
-    def create_mm_token_type_ids(self, input_ids):
+    def create_mm_token_type_ids(self, input_ids: List[int], mm_mask: Optional[List[bool]] = None) -> torch.Tensor:
         processor = self.processor
-        image_token_id = getattr(processor, 'image_token_id', None)
-        video_token_id = getattr(processor, 'video_token_id', None)
-        audio_token_id = getattr(processor, 'audio_token_id', None)
+        if not isinstance(input_ids, torch.Tensor):
+            input_ids = torch.tensor(input_ids)
+        if mm_mask is None:
+            mm_mask = True
+        elif not isinstance(mm_mask, torch.Tensor):
+            mm_mask = torch.tensor(mm_mask, dtype=torch.bool)
         mm_token_type_ids = torch.zeros_like(input_ids)
-        if image_token_id is not None:
-            mm_token_type_ids[input_ids == image_token_id] = 1
-        if video_token_id is not None:
-            mm_token_type_ids[input_ids == video_token_id] = 2
-        if audio_token_id is not None:
-            mm_token_type_ids[input_ids == audio_token_id] = 3
+        for key, mm_token_id in zip(['image', 'video', 'audio'], [1, 2, 3]):
+            media_token_id = getattr(processor, f'{key}_token_id', None)
+            if media_token_id is None:
+                continue
+            mm_token_type_ids[(input_ids == media_token_id) & mm_mask] = mm_token_id
         return mm_token_type_ids
 
     def _data_collator_mm_data(self, batch: List[Dict[str, Any]]) -> Dict[str, Any]:

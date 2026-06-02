@@ -51,7 +51,7 @@ class HfConfigFactory:
             res.append((config, deep_getattr(config, attr_name)))
 
         for k in keys:
-            if k.endswith('_config'):
+            if k.endswith('_config') and k != 'talker_config':
                 if isinstance(config, dict):
                     v = config[k]
                 else:
@@ -169,6 +169,7 @@ class HfConfigFactory:
         if torch_dtype is None:
             return None
         if isinstance(torch_dtype, str):
+            torch_dtype = torch_dtype.replace('torch.', '')
             torch_dtype = getattr(torch, torch_dtype)
         return torch_dtype
 

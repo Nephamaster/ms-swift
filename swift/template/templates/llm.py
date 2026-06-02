@@ -347,7 +347,7 @@ class HyV3Template(Template):
         if self.reasoning_effort is None:
             self.reasoning_effort = 'high' if self.enable_thinking else 'no_think'
         self.enable_thinking = self.reasoning_effort != 'no_think'
-        self.chat_template_kwargs = {'reasoning_effort': self.reasoning_effort}
+        self.chat_template_kwargs['reasoning_effort'] = self.reasoning_effort
 
     def _get_enable_thinking(self, inputs=None):
         reasoning_effort = None if inputs is None else inputs.chat_template_kwargs.get('reasoning_effort')
@@ -453,6 +453,17 @@ register_template(
         suffix=['<|endoftext|>'],
         is_thinking=True,
         thinking_prefix='<think>\n',
+    ))
+
+register_template(
+    TemplateMeta(
+        LLMTemplateType.ring2_5,
+        prefix=[],
+        system_prefix=['<role>SYSTEM</role>\n{{SYSTEM}}\n\n'],
+        prompt=['<role>HUMAN</role>\n{{QUERY}}<|role_end|>\n\n<role>ASSISTANT</role>\n'],
+        chat_sep=['<|role_end|>\n\n'],
+        suffix=['<|role_end|>\n\n'],
+        is_thinking=True,
     ))
 
 register_template(

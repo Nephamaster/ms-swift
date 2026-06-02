@@ -56,6 +56,7 @@ class MLLMModelArch:
     interns1 = 'interns1'
     minicpmv = 'minicpmv'
     minicpmo = 'minicpmo'
+    minicpmv4_6 = 'minicpmv4_6'
     deepseek_vl = 'deepseek_vl'
     deepseek_vl2 = 'deepseek_vl2'
     deepseek_janus = 'deepseek_janus'
@@ -90,7 +91,7 @@ class MLLMModelArch:
     step_audio2_mini = 'step_audio2_mini'
     hunyuan_vl = 'hunyuan_vl'
     step3_vl = 'step3_vl'
-    paddle_ocr_1_5 = 'paddle_ocr_1_5'
+    paddleocr_vl = 'paddleocr_vl'
 
 
 class ModelArch(LLMModelArch, MLLMModelArch):
@@ -488,6 +489,14 @@ register_model_arch(
 
 register_model_arch(
     MultiModelKeys(
+        MLLMModelArch.minicpmv4_6,
+        language_model='model.language_model',
+        aligner='model.merger',
+        vision_tower='model.vision_tower',
+    ))
+
+register_model_arch(
+    MultiModelKeys(
         MLLMModelArch.minicpmo,
         language_model='llm',
         aligner='resampler',
@@ -781,7 +790,7 @@ register_model_arch(
 
 register_model_arch(
     MultiModelKeys(
-        MLLMModelArch.paddle_ocr_1_5,
+        MLLMModelArch.paddleocr_vl,
         language_model=['model.language_model', 'lm_head'],
         aligner='model.projector',
         vision_tower='model.visual',

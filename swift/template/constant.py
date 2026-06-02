@@ -75,6 +75,7 @@ class LLMTemplateType:
     baichuan = 'baichuan'
     baichuan_m1 = 'baichuan_m1'
     minicpm = 'minicpm'
+    minicpm5 = 'minicpm5'
     telechat = 'telechat'
     telechat2 = 'telechat2'
 
@@ -98,6 +99,7 @@ class LLMTemplateType:
     ling = 'ling'
     ling2 = 'ling2'
     ring2 = 'ring2'
+    ring2_5 = 'ring2_5'
     yuan = 'yuan'
     xverse = 'xverse'
     bluelm = 'bluelm'
