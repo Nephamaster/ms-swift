@@ -23,6 +23,7 @@ from queue import Queue
 from torch.nn import ModuleList
 from torch.utils.data import DataLoader
 from transformers import PreTrainedModel, TrainerCallback
+from transformers.utils import is_torch_npu_available
 from types import MethodType
 from typing import Any, Dict, List, Optional, Union
 
@@ -574,15 +575,7 @@ class RolloutTrainerMixin(RLHFTrainerMixin):
                     self.vllm_client.update_named_param(name, param)
         elif self.vllm_mode == 'colocate':
             llm_model = self.engine.inner_model
-            # Patch MoE weight_loader if needed
-            patch_vllm_moe_model_weight_loader(llm_model)
-            # Re-run process_weights_after_loading on FusedMoE layers so
-            # the kernel-format layout is rebuilt after the in-place reload
-            # (workaround for vLLM issue #42821).
-            try:
-                llm_model.load_weights(state_dict.items())
-            finally:
-                finish_vllm_weight_reload(llm_model)
+            llm_model.load_weights(state_dict.items())
         del state_dict
 
     def _fix_param_name_to_vllm(self, name: str, extra_prefixes: Optional[List[str]] = None) -> str:
@@ -607,6 +600,10 @@ class RolloutTrainerMixin(RLHFTrainerMixin):
             Processed state dict ready for vLLM
         """
         processed = {}
+        expand_fused_moe_expert_weight = None
+        if is_torch_npu_available():
+            from swift.model.npu_patch.vllm_ascend_moe import expand_fused_moe_expert_weight_for_vllm_ascend
+            expand_fused_moe_expert_weight = expand_fused_moe_expert_weight_for_vllm_ascend
         for name, param in state_dict.items():
             # Clean up parameter name for PEFT models
             clean_name = name.removeprefix('base_model.model.')
@@ -632,6 +629,12 @@ class RolloutTrainerMixin(RLHFTrainerMixin):
                 if param.is_cpu:
                     param = param.to(get_current_device())
                 param = param.full_tensor()
+
+            if expand_fused_moe_expert_weight is not None:
+                expanded_moe_weights = expand_fused_moe_expert_weight(clean_name, param)
+                if expanded_moe_weights is not None:
+                    processed.update(expanded_moe_weights)
+                    continue
 
             processed[clean_name] = param
 
@@ -753,6 +756,13 @@ class RolloutTrainerMixin(RLHFTrainerMixin):
         if parameter_group_no_lora:
             if is_peft:
                 parameter_group_no_lora = [n.replace('base_model.model.', '') for n in parameter_group_no_lora]
+            parameter_group_no_lora = set(parameter_group_no_lora)
+            if is_torch_npu_available():
+                from swift.model.npu_patch.vllm_ascend_moe import expand_fused_moe_expert_names_for_vllm_ascend
+                for name in tuple(parameter_group_no_lora):
+                    expanded_names = expand_fused_moe_expert_names_for_vllm_ascend(name)
+                    if expanded_names is not None:
+                        parameter_group_no_lora.update(expanded_names)
             state_dict = {k: v for k, v in state_dict.items() if k in parameter_group_no_lora}
 
         if is_peft:
@@ -772,6 +782,10 @@ class RolloutTrainerMixin(RLHFTrainerMixin):
         should_merge = is_peft and not self._is_fsdp2 and not self.rollout_enable_lora
 
         gather_if_zero3 = get_gather_if_zero3_context(self)
+
+        # Colocate: patch MoE weight_loader once before loading all groups
+        if self.vllm_mode == 'colocate':
+            patch_vllm_moe_model_weight_loader(self.engine.inner_model)
 
         for i, parameter_group in enumerate(self.parameter_groups):
             parameter_group_no_lora = self.parameter_groups_no_lora[i]
@@ -796,6 +810,14 @@ class RolloutTrainerMixin(RLHFTrainerMixin):
                     if should_merge:
                         with patch_lora_unmerge(self.model):
                             self.model.unmerge_adapter()
+
+        # Re-run process_weights_after_loading once after ALL groups loaded
+        if self.vllm_mode == 'colocate':
+            _model_config = self.engine.engine.model_config
+            llm_model = self.engine.inner_model
+            finish_vllm_weight_reload(llm_model, model_config=_model_config, target_device=self.accelerator.device)
+        elif self.vllm_mode == 'server' and self.accelerator.is_main_process:
+            self.vllm_client.process_weights_after_loading()
 
         if is_peft:
             self.base_sync_done = True
