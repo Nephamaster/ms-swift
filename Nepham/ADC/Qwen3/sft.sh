@@ -1,10 +1,10 @@
-nproc_per_node=8
+nproc_per_node=2
 
 PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True' \
 NPROC_PER_NODE=$nproc_per_node \
-CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+CUDA_VISIBLE_DEVICES=4,5 \
 swift sft \
-    --output_dir Nepham/output/ADC/Qwen3/ \
+    --output_dir Nepham/output/ADC/Qwen3-8B-Base-Char/ \
     --model ../ADC/charize/Qwen3-8B-Base-Char \
     --model_type qwen3 \
     --template qwen3 \
@@ -22,10 +22,10 @@ swift sft \
     --torch_dtype bfloat16 \
     --tuner_type full \
     --num_train_epochs 1 \
-    --per_device_train_batch_size 8 \
+    --per_device_train_batch_size 2 \
     --per_device_eval_batch_size 1 \
-    --gradient_accumulation_steps 2 \
-    --learning_rate 1e-4 \
+    --gradient_accumulation_steps $(expr 64 / $nproc_per_node) \
+    --learning_rate 8e-5 \
     --eval_steps 250 \
     --save_steps 250 \
     --save_total_limit 5 \

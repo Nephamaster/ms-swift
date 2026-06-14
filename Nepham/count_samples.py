@@ -11,4 +11,4 @@ def count_samples_num(data_path:str):
 
 
 if __name__ == '__main__':
-    count_samples_num('../data/tiger_pt_zh_dataflow.jsonl')
+    count_samples_num('dataset/tiger_pt_zh_dataflow.jsonl')
