@@ -347,35 +347,58 @@ def build_streaming_dataloader(args, dataset, collate_fn):
     return MegatronDataLoaderDispatcher(base_dataloader)
 
 
-def _should_use_npu_attention_mask(args) -> bool:
+_NPU_ATTENTION_MASK_2D_MODEL_TYPES = {'qwen3_5', 'qwen3_5_moe'}
+
+
+def _should_use_npu_generated_attention_mask(args) -> bool:
     from transformers.utils import is_torch_npu_available
-    return (is_torch_npu_available() and args.task_type == 'causal_lm' and not args.padding_free
-            and getattr(args, 'attention_backend', None) != 'local' and getattr(args, 'use_flash_attn', False))
+    if not is_torch_npu_available():
+        return False
+    if args.task_type != 'causal_lm' or args.padding_free:
+        return False
+    if getattr(args, 'attention_backend', None) == 'local':
+        return False
+    return bool(getattr(args, 'use_flash_attn', False))
 
 
-def prepare_batch(args, data, vp_stage=None, num_samples=None):
+def _prepare_npu_generated_attention_mask(batch, *, keep_attention_mask_2d: bool) -> None:
+    if keep_attention_mask_2d:
+        attention_mask = batch.get('attention_mask')
+        if 'attention_mask_2d' not in batch and attention_mask is not None:
+            batch['attention_mask_2d'] = (attention_mask == 0).sum(dim=(1, 2)) > 0
+    else:
+        batch.pop('attention_mask_2d', None)
+    batch['attention_mask'] = None
+
+
+def prepare_batch(args, data, vp_stage=None):
     """Prepare a micro-batch for Megatron forward: PP slicing, packed_seq_params, CP slicing.
 
     Extracted from BaseMegatronTrainer._prepare_batch for reuse in ray workers.
     """
     batch = get_batch_on_this_pp_rank(args, data, vp_stage=vp_stage)
-    if num_samples is None:
-        num_samples = batch.pop('num_samples')
     seq_lens = batch.pop('seq_lens', None)
+    # Consider compatibility and security.
+    num_samples = batch.pop('num_samples', None)
+    if seq_lens is not None:
+        if num_samples is not None:
+            assert num_samples == len(seq_lens), (
+                f"'num_samples' ({num_samples}) is inconsistent with len(seq_lens) ({len(seq_lens)}).")
+        num_samples = len(seq_lens)
     text_position_ids = batch.pop('text_position_ids', None)
     if text_position_ids is None:
         text_position_ids = batch.get('position_ids')
-    if _should_use_npu_attention_mask(args):
-        if 'attention_mask_2d' not in batch and batch.get('attention_mask') is not None:
-            batch['attention_mask_2d'] = (~batch['attention_mask']).sum(dim=(1, 2)) > 0
-        batch['attention_mask'] = None
+    if _should_use_npu_generated_attention_mask(args):
+        _prepare_npu_generated_attention_mask(
+            batch, keep_attention_mask_2d=getattr(args, 'model_type', None) in _NPU_ATTENTION_MASK_2D_MODEL_TYPES)
     else:
         batch.pop('attention_mask_2d', None)
     if args.padding_free and text_position_ids is not None:
         batch['packed_seq_params'] = get_packed_seq_params(text_position_ids)
-        batch['packed_seq_params'].num_samples = num_samples
         if seq_lens is not None:
             batch['packed_seq_params'].seq_lens = torch.tensor(seq_lens, device=text_position_ids.device)
+        if num_samples is not None:
+            batch['packed_seq_params'].num_samples = num_samples
     batch = get_batch_on_this_cp_rank(args, batch)
     return batch
 
@@ -426,7 +449,7 @@ def compute_per_token_logps_fn(model, args, data_iterator, temperature=1.0, no_g
 
     packed_seq_params = data.get('packed_seq_params')
     if packed_seq_params is not None:
-        num_samples = packed_seq_params.num_samples
+        num_samples = packed_seq_params.seq_lens.shape[0]
     else:
         input_ids = data.get('input_ids')
         num_samples = input_ids.shape[0] if input_ids is not None else labels.shape[0]

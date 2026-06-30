@@ -1,9 +1,8 @@
 import os
 import torch
 
-from swift.utils import select_device
-
-select_device('0,1,2,3')
+os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,2,3'
+os.environ['ASCEND_RT_VISIBLE_DEVICES'] = '0,1,2,3'
 os.environ['SWIFT_DEBUG'] = '1'
 
 
@@ -1033,7 +1032,8 @@ def test_llava_onevision1_5():
 
 
 def test_paddle_ocr():
-    select_device('0')
+    os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+    os.environ['ASCEND_RT_VISIBLE_DEVICES'] = '0'
     engine = TransformersEngine('PaddlePaddle/PaddleOCR-VL')
     query = 'OCR:'
     messages = [{'role': 'user', 'content': query}]
@@ -1201,7 +1201,8 @@ def test_step3_vl():
 
 
 def test_paddle_ocr_1_5():
-    select_device('0')
+    os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+    os.environ['ASCEND_RT_VISIBLE_DEVICES'] = '0'
     engine = TransformersEngine('PaddlePaddle/PaddleOCR-VL-1.5')
     query = 'OCR:'
     messages = [{'role': 'user', 'content': query}]
@@ -1259,6 +1260,15 @@ def test_mineru2_5_pro():
         'content': '<image>\nText Recognition:',
     }]
     response = _infer_model(engine, messages=messages, images=images)
+    print(response)
+
+
+def test_unlimited_ocr():
+    engine = TransformersEngine('PaddlePaddle/Unlimited-OCR')
+    query = 'Free OCR.'
+    messages = [{'role': 'user', 'content': query}]
+    images = ['http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/ocr.png']
+    response = _infer_model(engine, messages=messages, images=images, max_tokens=256)
     print(response)
 
 
@@ -1352,3 +1362,4 @@ if __name__ == '__main__':
     # test_glm_ocr()
     # test_gemma4()
     # test_mineru2_5_pro()
+    # test_unlimited_ocr()

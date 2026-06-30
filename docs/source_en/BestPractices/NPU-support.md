@@ -12,6 +12,28 @@ If this is your first time using ms-swift on NPUs, we recommend reading this doc
 4. Use "Quick Start" to complete one ModelScope model LoRA training, merge, inference, and deployment flow.
 5. For larger-scale training, continue reading the DDP, DeepSpeed, and MindSpeed/Megatron-SWIFT sections.
 
+## Hardware and Supported Operating Systems
+
+**Table 1** Product hardware support list
+
+| Product | Supported |
+| ------- | :-------: |
+| <term>Ascend 950 series products</term> | √ |
+| <term>Atlas A3 training series products</term> | √ |
+| <term>Atlas A3 inference series products</term> | x |
+| <term>Atlas A2 training series products</term> | √ |
+| <term>Atlas A2 inference series products</term> | x |
+| <term>Atlas 200I/500 A2 inference products</term> | x |
+| <term>Atlas inference series products</term> | x |
+| <term>Atlas training series products</term> | x |
+
+> [!NOTE]
+>
+> In this section, "√" indicates supported and "x" indicates not supported.
+
+- For operating systems supported by each hardware product in physical-machine deployment scenarios, see the [Compatibility Query Assistant](https://www.hiascend.com/hardware/compatibility).
+- For operating systems supported by each hardware product in VM and container deployment scenarios, see "Operating System Compatibility" in CANN Software Installation for the [commercial edition](https://www.hiascend.com/document/detail/zh/canncommercial/900/softwareinst/instg/instg_0101.html?OS=openEuler&InstallType=netyum) or [community edition](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/900/softwareinst/instg/instg_0101.html?OS=openEuler&InstallType=netyum).
+
 ## Support Scope at a Glance
 
 Recommended base environment versions:
@@ -88,6 +110,19 @@ For base environment setup, see the [Ascend PyTorch installation guide](https://
 | Using SGLang as the inference engine      |
 | Enabling ETP for LoRA training in Megatron |
 
+### PEFT Transformers 5 MoE Fused Expert LoRA Limitation
+
+When training Transformers 5 MoE models such as Qwen3.5-MoE and Qwen3-Omni-MoE with LoRA, some expert weights may be stored as fused `nn.Parameter` tensors instead of ordinary `nn.Linear` modules. Injecting LoRA into these parameters relies on PEFT's `target_parameters` path.
+
+This path is not fully stable yet with combinations such as `lora_dropout`, ZeRO-3/FSDP, and multiple adapters. Typical trigger conditions include:
+
+- using a MoE model;
+- using LoRA and trying to cover fused expert parameters;
+- triggering PEFT's Transformers 5 MoE target conversion path through the model config or the command-line `--model_type`;
+- using the default `lora_dropout != 0`, or using parameter-sharding backends such as ZeRO-3/FSDP.
+
+For regular Qwen3.5 GRPO/SFT LoRA training, avoid explicitly passing `--model_type` when it is not needed. If the model config itself already triggers this PEFT path, prefer full-parameter training or disable the affected LoRA combination. If fused expert LoRA is required, wait for the PEFT upstream support to stabilize, or use it only after validating the target model and training backend with `lora_dropout=0`.
+
 ## Choose Your Usage Path
 
 | Scenario                               | Recommended path                                      | Need MindSpeed |
@@ -101,9 +136,17 @@ For base environment setup, see the [Ascend PyTorch installation guide](https://
 
 ### Image/Container Environment Installation
 
-The official NPU image is still being prepared for release. Before the official image is released, you can build a container environment with CANN, PyTorch, torch_npu, and ms-swift dependencies from the Dockerfile provided by the project. The container approach makes dependency versions easier to freeze and helps reproduce the same environment across multiple Ascend machines.
+The official NPU image is available at [quay.io/ascend/ms-swift](https://quay.io/repository/ascend/ms-swift?tab=tags). We recommend choosing an image tag that matches your device generation, Python version, CANN version, and OS version first. If you need to pin a branch or customize dependencies, build the image from the Dockerfile provided by the project. The container approach makes dependency versions easier to freeze and helps reproduce the same environment across multiple Ascend machines.
 
-Clone the modelscope repository first, then build the image with [Dockerfile.ascend](https://github.com/modelscope/modelscope/blob/master/docker/Dockerfile.ascend) and [build_image.py](https://github.com/modelscope/modelscope/blob/master/docker/build_image.py):
+The following example uses the A2, Python 3.11, CANN 9.0.0, Ubuntu 22.04 tag. In actual use, choose the latest tag from the Quay tag page that matches your machine and software stack.
+
+```shell
+docker pull quay.io/ascend/ms-swift:v4.3.0-A2-py311-CANN9.0.0-ubuntu22.04
+export IMAGE_NAME=quay.io/ascend/ms-swift:v4.3.0-A2-py311-CANN9.0.0-ubuntu22.04
+export WORKSPACE=/path/to/workspace
+```
+
+If you need to build the image yourself, clone the modelscope repository first, then use [Dockerfile.ascend](https://github.com/modelscope/modelscope/blob/master/docker/Dockerfile.ascend) and [build_image.py](https://github.com/modelscope/modelscope/blob/master/docker/build_image.py):
 
 ```shell
 git clone https://github.com/modelscope/modelscope.git
@@ -115,11 +158,10 @@ DOCKER_REGISTRY=ms-swift python docker/build_image.py \
   --arch arm
 ```
 
-The current `build_image.py` generates Ascend image names in the format `{DOCKER_REGISTRY}:{swift_branch}-{atlas_hardware}-{python_tag}-{arch}`. The command above uses the ARM-based Atlas 900 A2 PODc as an example and usually generates `ms-swift:main-A2-py311-arm`. Save the image name and workspace path in variables as shown below. Replace the image name with the actual one from your build log.
+The current `build_image.py` generates Ascend image names in the format `{DOCKER_REGISTRY}:{swift_branch}-{atlas_hardware}-{python_tag}-{arch}`. The command above uses the ARM-based Atlas 900 A2 PODc as an example and usually generates `ms-swift:main-A2-py311-arm`. If you use a self-built image, replace `IMAGE_NAME` above with the actual image name from your build log.
 
 ```shell
 export IMAGE_NAME=ms-swift:main-A2-py311-arm
-export WORKSPACE=/path/to/workspace
 ```
 
 Before starting the container, check which NPU devices are exposed on the host:

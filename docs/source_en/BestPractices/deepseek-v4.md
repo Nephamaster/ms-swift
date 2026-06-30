@@ -11,17 +11,14 @@ pip install git+https://github.com/modelscope/mcore-bridge.git
 pip install git+https://github.com/modelscope/ms-swift.git
 
 # Megatron-LM is tested under the following commit hash
-pip install git+https://github.com/NVIDIA/Megatron-LM.git@630956b357d4b2375e3fc5c7be8b8e429092866d
+# pip install git+https://github.com/NVIDIA/Megatron-LM.git@9af7c7937b6123bb0b22be4d8eb28a8ebf407d7d
 ```
 
 ## Precision Alignment
 
-Megatron-Core currently has a bug in its operator implementation for DeepSeek-V4, which causes precision errors (this may be fixed in the future). See [this issue](https://github.com/NVIDIA/Megatron-LM/issues/4957) for details. You need to apply the following code modifications:
-- Change [this line](https://github.com/NVIDIA/Megatron-LM/blob/56481b0501cf7b3719e1869c495e2680ef0f3456/megatron/core/transformer/hyper_connection.py#L76) to `mixed = torch.bmm(h_res_batched.transpose(-1, -2), residual_batched).view(s, b, n, C)`.
-- Change [this line](https://github.com/NVIDIA/Megatron-LM/blob/56481b0501cf7b3719e1869c495e2680ef0f3456/megatron/core/transformer/hyper_connection.py#L386) to `h_res_batched = h_res.transpose(-1, -2).contiguous().view(s * b, n, n)`.
-- In addition, to enable precision alignment testing (FP32), you also need to comment out [these lines](https://github.com/NVIDIA/Megatron-LM/blob/56481b0501cf7b3719e1869c495e2680ef0f3456/megatron/core/transformer/experimental_attention_variant/dsa.py#L41-L43).
+- To support precision alignment testing (FP32), you need to comment out [these lines](https://github.com/NVIDIA/Megatron-LM/blob/bd381ac364b5139840f0cba6389db54f2c092e90/megatron/core/transformer/experimental_attention_variant/dsa.py#L41-L43).
 
-After applying the changes above, run the following code to verify that the implementation is correct (it tests forward alignment between transformers and Megatron):
+After modifying the code, run the following tests to confirm there are no precision alignment issues (testing the forward alignment between transformers and megatron):
 
 First, create a mini version of the model with only 4 layers:
 
@@ -217,3 +214,41 @@ swift infer \
 Inference result:
 
 ![result](../../resources/deepseek_v4/infer_result.png)
+
+Running vLLM inference:
+
+- If you want to use vLLM for inference, you can refer to [this documentation](https://recipes.vllm.ai/deepseek-ai/DeepSeek-V4-Flash). You need FP4/FP8 precision weights.
+- Additionally, you need to copy the original 'config.json' file and modify 'expert_dtype' (consistent with the config.json after training). This is because the file saved by transformers' `config.save_pretrained` differs from the original file, and vLLM is not compatible with the saved file.
+- If you encounter tilelang issues, you can check [this issue](https://github.com/modelscope/ms-swift/issues/9494).
+- mcore-bridge DeepSeek-V4 FP8 fix: [PR](https://github.com/modelscope/mcore-bridge/pull/133).
+
+First perform quantization (note: this quantization will cause LoRA incremental information loss; this is only an example. It is recommended to use FP8 full-parameter training and export FP8 weights):
+
+```shell
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+NPROC_PER_NODE=8 \
+megatron export \
+    --model megatron_output/DeepSeek-V4-Flash/vx-xxx/checkpoint-xxx-merged \
+    --output_dir megatron_output/DeepSeek-V4-Flash/vx-xxx/checkpoint-xxx-merged-FP8 \
+    --to_hf true \
+    --fp8_recipe blockwise \
+    --fp8_format e4m3 \
+    --fp8_param_gather true \
+    --mtp_num_layers 1 \
+    --expert_model_parallel_size 8
+```
+
+vLLM launch command:
+```shell
+vllm serve megatron_output/DeepSeek-V4-Flash/vx-xxx/checkpoint-xxx-merged-FP8 \
+    --trust-remote-code \
+    --kv-cache-dtype fp8 \
+    --block-size 256 \
+    --enable-expert-parallel \
+    --tensor-parallel-size 8 \
+    --max-model-len 8192 \
+    --tokenizer-mode deepseek_v4 \
+    --tool-call-parser deepseek_v4 \
+    --enable-auto-tool-choice \
+    --reasoning-parser deepseek_v4
+```

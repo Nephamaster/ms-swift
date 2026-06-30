@@ -22,7 +22,6 @@ from megatron.core.transformer.multi_token_prediction import MTPLossLoggingHelpe
 from modelscope import check_local_model_is_latest
 from packaging import version
 from pathlib import Path
-from transformers.utils import is_torch_npu_available
 from typing import Callable, Dict, List, Optional
 
 from swift.dataset import RowPreprocessor
@@ -137,11 +136,14 @@ class BaseMegatronTrainer(ABC):
         if config.num_moe_experts is not None:
             moe_loss_scale = 1 / args.num_microbatches / n_steps
             track_names = []
-            if config.moe_router_load_balancing_type == 'aux_loss':
+            load_balancing_type = config.moe_router_load_balancing_type
+            if isinstance(load_balancing_type, str):
+                load_balancing_type = [load_balancing_type]
+            if 'aux_loss' in load_balancing_type:
                 track_names.append('load_balancing_loss')
-            elif config.moe_router_load_balancing_type == 'seq_aux_loss':
+            if 'seq_aux_loss' in load_balancing_type:
                 track_names.append('seq_load_balancing_loss')
-            elif config.moe_router_load_balancing_type == 'global_aux_loss':
+            if 'global_aux_loss' in load_balancing_type:
                 track_names.append('global_load_balancing_loss')
             if config.moe_z_loss_coeff is not None:
                 track_names.append('z_loss')
@@ -982,12 +984,8 @@ class BaseMegatronTrainer(ABC):
     def forward_step(self, data_iterator, model):
         pass
 
-    def _should_use_npu_generated_attention_mask(self, args) -> bool:
-        return (is_torch_npu_available() and args.task_type == 'causal_lm' and not args.padding_free
-                and getattr(args, 'attention_backend', None) != 'local' and getattr(args, 'use_flash_attn', False))
-
-    def _prepare_batch(self, data, vp_stage=None, num_samples=None):
-        return prepare_batch(self.args, data, vp_stage=vp_stage, num_samples=num_samples)
+    def _prepare_batch(self, data, vp_stage=None):
+        return prepare_batch(self.args, data, vp_stage=vp_stage)
 
     def get_batch(self, data_iterator, vp_stage=None):
         """Generate a batch."""
@@ -1014,7 +1012,7 @@ class BaseMegatronTrainer(ABC):
                 }
         return {}
 
-    def get_last_tokens(self, output_tensor, packed_seq_params=None, attention_mask=None, num_samples=None):
+    def get_last_tokens(self, output_tensor, packed_seq_params=None, attention_mask=None):
         if self.args.context_parallel_size > 1:
             output_tensor = reconstruct_tensor_cp(output_tensor, packed_seq_params, dim=1)
         if packed_seq_params is None:
@@ -1024,10 +1022,7 @@ class BaseMegatronTrainer(ABC):
             last_token_idx = get_last_valid_indices(attention_mask.long())
             last_tokens = output_tensor[torch.arange(output_tensor.shape[0]), last_token_idx]
         else:
-            num_samples = num_samples or packed_seq_params.num_samples
-            if self.args.context_parallel_size > 1:
-                last_token_idx = packed_seq_params.cu_seqlens_q[:num_samples] + packed_seq_params.seq_lens - 1
-            else:
-                last_token_idx = packed_seq_params.cu_seqlens_q[1:num_samples + 1] - 1
+            num_samples = packed_seq_params.seq_lens.shape[0]
+            last_token_idx = packed_seq_params.cu_seqlens_q[:num_samples] + packed_seq_params.seq_lens - 1
             last_tokens = output_tensor[0, last_token_idx]
         return last_tokens

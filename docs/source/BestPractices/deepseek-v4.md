@@ -11,17 +11,14 @@ pip install git+https://github.com/modelscope/mcore-bridge.git
 pip install git+https://github.com/modelscope/ms-swift.git
 
 # Megatron-LM在以下commit hash下进行测试
-# pip install git+https://github.com/NVIDIA/Megatron-LM.git@630956b357d4b2375e3fc5c7be8b8e429092866d
+# pip install git+https://github.com/NVIDIA/Megatron-LM.git@9af7c7937b6123bb0b22be4d8eb28a8ebf407d7d
 ```
 
 ## 精度对齐
 
-目前Megatron-Core对DeepSeek-V4的支持算子实现有误，存在精度误差（后续可能更新），具体查看[这个issue](https://github.com/NVIDIA/Megatron-LM/issues/4957)。你需要修改部分代码：
-- 修改[这行](https://github.com/NVIDIA/Megatron-LM/blob/56481b0501cf7b3719e1869c495e2680ef0f3456/megatron/core/transformer/hyper_connection.py#L76)，修改为`mixed = torch.bmm(h_res_batched.transpose(-1, -2), residual_batched).view(s, b, n, C)`
-- 修改[这行](https://github.com/NVIDIA/Megatron-LM/blob/56481b0501cf7b3719e1869c495e2680ef0f3456/megatron/core/transformer/hyper_connection.py#L386)，修改为`h_res_batched = h_res.transpose(-1, -2).contiguous().view(s * b, n, n)`
-- 此外为了支持精度对齐测试（FP32），你需注释掉[这几行](https://github.com/NVIDIA/Megatron-LM/blob/56481b0501cf7b3719e1869c495e2680ef0f3456/megatron/core/transformer/experimental_attention_variant/dsa.py#L41-L43)。
+- 为了支持精度对齐测试（FP32），你需注释掉[这几行](https://github.com/NVIDIA/Megatron-LM/blob/bd381ac364b5139840f0cba6389db54f2c092e90/megatron/core/transformer/experimental_attention_variant/dsa.py#L41-L43)。
 
-修改完代码后，测试以下代码，确认无实现错误（测试transformers/megatron forward对齐情况）：
+修改完代码后，测试以下代码，确认无精度对齐问题（测试transformers/megatron forward对齐情况）：
 
 创建mini版本的模型，我们将创建4层：
 
@@ -217,3 +214,41 @@ swift infer \
 推理结果：
 
 ![result](../../resources/deepseek_v4/infer_result.png)
+
+跑通vLLM推理：
+
+- 如果要使用vllm推理，你可以参考[这里的文档](https://recipes.vllm.ai/deepseek-ai/DeepSeek-V4-Flash)。你需要FP4/FP8精度的权重。
+- 此外你需要copy原始的'config.json'文件，并修改'expert_dtype'（与训练后的config.json一致）。因为，使用transformers的`config.save_pretrained`保存的文件与原始文件不同，vllm不兼容保存后的文件。
+- 如果遇到tilelang问题，可以查看[这个issue](https://github.com/modelscope/ms-swift/issues/9494)。
+- mcore-bridge DeepSeek-V4 Fp8修复：[PR](https://github.com/modelscope/mcore-bridge/pull/133)。
+
+这里先做量化（这里的量化会导致LoRA增量信息丢失，这里只作为例子，建议使用FP8全参数训练并导出FP8权重）：
+
+```shell
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+NPROC_PER_NODE=8 \
+megatron export \
+    --model megatron_output/DeepSeek-V4-Flash/vx-xxx/checkpoint-xxx-merged \
+    --output_dir megatron_output/DeepSeek-V4-Flash/vx-xxx/checkpoint-xxx-merged-FP8 \
+    --to_hf true \
+    --fp8_recipe blockwise \
+    --fp8_format e4m3 \
+    --fp8_param_gather true \
+    --mtp_num_layers 1 \
+    --expert_model_parallel_size 8
+```
+
+vLLM启动命令：
+```shell
+vllm serve megatron_output/DeepSeek-V4-Flash/vx-xxx/checkpoint-xxx-merged-FP8 \
+    --trust-remote-code \
+    --kv-cache-dtype fp8 \
+    --block-size 256 \
+    --enable-expert-parallel \
+    --tensor-parallel-size 8 \
+    --max-model-len 8192 \
+    --tokenizer-mode deepseek_v4 \
+    --tool-call-parser deepseek_v4 \
+    --enable-auto-tool-choice \
+    --reasoning-parser deepseek_v4
+```

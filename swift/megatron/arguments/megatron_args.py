@@ -55,9 +55,13 @@ class RLHFMegatronArgumentsMixin:
         })
     gkd_logits_topk: Optional[int] = None
     lmbda: float = 0.5  # On-policy probability: with prob lmbda, use student-generated responses
-    seq_kd: bool = False  # Sequential KD: use teacher-generated responses when not on-policy
+    seq_kd: bool = False  # Deprecated
     offload_teacher_model: bool = False  # Offload teacher model to CPU to save GPU memory
     sft_alpha: float = 0.0  # Weight for SFT loss in GKD (0 = pure JSD, >0 = JSD + sft_alpha * SFT)
+
+    # OPD-RL (On-Policy Distillation as RL): a teacher (teacher_model / teacher_model_server)
+    # on a GRPO run turns it into OPD-RL, injecting teacher KL as the advantage.
+    teacher_kl_coef: float = 1.0
 
     # grpo/gkd
     temperature: float = 0.9  # Temperature for sampling and loss computation
@@ -218,34 +222,27 @@ class RLHFMegatronArgumentsMixin:
                 self.cosine_max_len = self.max_completion_length
             if self.vllm_limit_mm_per_prompt is not None:
                 self.vllm_limit_mm_per_prompt = json_parse_to_dict(self.vllm_limit_mm_per_prompt)
+        # Teacher setup is identical for GKD and GRPO (OPD-RL): a teacher_model / server /
+        # same-model LoRA self-distillation all flow through the same detection. GKD also
+        # allows dynamic self-distillation (no teacher at all); GRPO without a teacher is
+        # plain RL, so only resolve a teacher for GRPO when one is configured.
+        if self.rlhf_type == 'gkd' or (self.rlhf_type == 'grpo' and
+                                       (self.teacher_model is not None or self.teacher_model_server is not None)):
+            self._check_teacher()
+            if self.rlhf_type == 'grpo':
+                self._check_opd_rl()
         if self.rlhf_type == 'gkd':
-            if self.teacher_model is not None and self.teacher_model_server is not None:
-                raise ValueError('GKD requires either `teacher_model` or `teacher_model_server` to be set, not both.')
-
-            # Self-distillation: teacher_model == student model
-            self._teacher_use_disable_adapter = False
-            if self.teacher_model is not None and self.teacher_model == self.model:
-                if self.tuner_type == 'lora':
-                    logger.info(
-                        'LoRA + same teacher_model: using disable_adapter() for fixed teacher (no extra model).')
-                    self._teacher_use_disable_adapter = True
-                    self.teacher_model = None
-                else:
-                    # Full training + same teacher_model: a separate frozen copy will be loaded as fixed teacher.
-                    pass
-
-            # Self-distillation: no teacher_model → dynamic teacher (current student weights)
-            if self.teacher_model is None and self.teacher_model_server is None:
-                logger.info('No teacher_model specified. Using self-distillation mode (teacher = student).')
-
-            # When using teacher_model_server, gkd_logits_topk is required (API only returns top-k logprobs)
-            if self.teacher_model_server is not None:
-                if self.gkd_logits_topk is None:
-                    raise ValueError('gkd_logits_topk is required when using teacher_model_server')
+            # GKD-specific: the API path only returns top-k logprobs, so gkd_logits_topk is required.
+            if self.teacher_model_server is not None and self.gkd_logits_topk is None:
+                raise ValueError('gkd_logits_topk is required when using teacher_model_server')
 
             # Validate gkd_logits_topk
             if self.gkd_logits_topk is not None and self.gkd_logits_topk <= 0:
                 raise ValueError(f'gkd_logits_topk must be a positive integer, got {self.gkd_logits_topk}')
+
+            # seq_kd (teacher-generated responses) is not implemented; raise early.
+            if self.seq_kd:
+                raise NotImplementedError('seq_kd=True (Sequential KD with teacher generation) is not supported.')
 
             self.num_generations = 1
             self._init_generation_batch_params()
@@ -335,6 +332,50 @@ class RLHFMegatronArgumentsMixin:
             self.validate_batch_dp_alignment(self.generation_batch_size, self.num_generations, dp_size,
                                              self.micro_batch_size, world_size)
             self.per_device_generation_batch_size = self.generation_batch_size // world_size
+
+    def _check_teacher(self):
+        """Resolve the teacher (shared by GKD and GRPO/OPD-RL).
+
+        Detects the three teacher modes and sets ``_teacher_use_disable_adapter``:
+          - separate teacher_model / teacher_model_server,
+          - same-model LoRA self-distillation (disable_adapter, no extra model),
+          - dynamic self-distillation (no teacher -> teacher == current student weights).
+        """
+        if self.teacher_model is not None and self.teacher_model_server is not None:
+            raise ValueError('setting both `teacher_model` and `teacher_model_server` is not supported.')
+
+        # Fail fast: the Ray pipeline only supports a colocated teacher_model (see
+        # swift/ray/megatron/grpo_trainer.py), so reject teacher_model_server at parse time.
+        if self.use_ray and self.teacher_model_server is not None:
+            raise ValueError('teacher_model_server is not supported with use_ray')
+
+        self._teacher_use_disable_adapter = False
+        if self.teacher_model is not None and self.teacher_model == self.model:
+            if self.tuner_type == 'lora':
+                logger.info('LoRA + same teacher_model: using disable_adapter() for fixed teacher (no extra model).')
+                self._teacher_use_disable_adapter = True
+                self.teacher_model = None
+            # Full training + same teacher_model: a separate frozen copy is loaded as the fixed teacher.
+
+    def _check_opd_rl(self):
+        """Fail-fast OPD-RL (teacher distillation on Megatron GRPO) parameter compatibility.
+
+        Mirrors ``RLHFArguments._check_opd_rl``: the teacher signal is a *per-token* advantage, so
+        features that need a *per-sequence* advantage (sign-based) or reward variance are rejected.
+        Called after ``_init_grpo`` so ``loss_type`` / ``scale_rewards`` are already resolved.
+        """
+        if self.loss_type in ['real', 'fipo']:
+            raise ValueError(f'OPD-RL (teacher) does not support loss_type={self.loss_type!r} '
+                             '(it needs a per-sequence advantage). Use grpo/bnpo/dr_grpo/dapo/cispo/sapo.')
+        if self.off_policy_sequence_mask_delta is not None:
+            raise ValueError('OPD-RL (teacher) does not support off_policy_sequence_mask_delta '
+                             '(it needs a per-sequence advantage).')
+        if not self.reward_funcs:
+            if self.dynamic_sample:
+                raise ValueError('dynamic_sample requires reward_funcs (it filters groups by reward std); '
+                                 'pure OPD-RL distillation has no reward variance.')
+            if self.scale_rewards == 'gdpo':
+                raise ValueError("scale_rewards='gdpo' requires reward_funcs; pure OPD-RL distillation has none.")
 
     def _init_grpo(self):
 
@@ -440,7 +481,7 @@ class MegatronArguments(RLHFMegatronArgumentsMixin, MegatronTunerMixin):
     apply_rope_fusion: bool = False
     gradient_accumulation_fusion: bool = True
     cross_entropy_loss_fusion: bool = True
-    cross_entropy_fusion_impl: Optional[Literal['native', 'te']] = None
+    cross_entropy_fusion_impl: Literal['native', 'te'] = 'native'
     calculate_per_token_loss: Optional[bool] = None
     attention_backend: str = 'flash'  # flash, fused, unfused, local, auto
     optimizer: Literal['adam', 'sgd', 'muon', 'dist_muon'] = 'adam'
@@ -497,9 +538,11 @@ class MegatronArguments(RLHFMegatronArgumentsMixin, MegatronTunerMixin):
     muon_use_nesterov: bool = False
     muon_scale_mode: Literal['spectral', 'unit_rms_norm', 'shape_scaling'] = 'spectral'
     muon_fp32_matmul_prec: Literal['low', 'medium', 'high'] = 'medium'
+    muon_coefficient_type: str = 'quintic'
     muon_num_ns_steps: int = 5
     muon_tp_mode: Literal['blockwise', 'duplicated', 'distributed'] = 'blockwise'
     muon_extra_scale_factor: float = 1.
+    muon_scalar_optimizer: str = 'adam'
 
     # checkpoint
     output_dir: Optional[str] = None
@@ -591,7 +634,7 @@ class MegatronArguments(RLHFMegatronArgumentsMixin, MegatronTunerMixin):
     moe_enable_deepep: bool = False
     moe_grouped_gemm: bool = True
     moe_permute_fusion: bool = False
-    moe_aux_loss_coeff: float = 0.
+    moe_aux_loss_coeff: List[float] = 0.
     moe_z_loss_coeff: Optional[float] = None
     moe_shared_expert_overlap: bool = False
     moe_layer_recompute: bool = False  # compat mcore 0.12
@@ -629,6 +672,7 @@ class MegatronArguments(RLHFMegatronArgumentsMixin, MegatronTunerMixin):
     # dsa
     dsa_indexer_loss_coeff: float = 0.
     dsa_indexer_use_sparse_loss: bool = False
+    apply_dsa_kernel_fusion: bool = False
     # deepseek-v4
     csa_dense_mode: bool = False
     use_fused_mhc: bool = False
@@ -720,15 +764,6 @@ class MegatronArguments(RLHFMegatronArgumentsMixin, MegatronTunerMixin):
         self._init_vpp_size()
         if self.vit_gradient_checkpointing is None:
             self.vit_gradient_checkpointing = not self.freeze_vit
-        if self.cross_entropy_fusion_impl is None:
-            if is_torch_npu_available():
-                self.cross_entropy_fusion_impl = 'native'
-            else:
-                import transformer_engine
-                if version.parse(transformer_engine.__version__) >= version.parse('2.8.0'):
-                    self.cross_entropy_fusion_impl = 'te'
-                else:
-                    self.cross_entropy_fusion_impl = 'native'
         if isinstance(self.report_to, str):
             self.report_to = [self.report_to]
         self.model_info, self.model_meta = get_model_info_meta(
@@ -804,6 +839,10 @@ class MegatronArguments(RLHFMegatronArgumentsMixin, MegatronTunerMixin):
         self._init_attention_backend()
         if self.sequence_parallel and self.tensor_model_parallel_size <= 1:
             self.sequence_parallel = False
+        if isinstance(self.moe_aux_loss_coeff, list) and len(self.moe_aux_loss_coeff) == 1:
+            self.moe_aux_loss_coeff = self.moe_aux_loss_coeff[0]
+        if isinstance(self.moe_router_load_balancing_type, list) and len(self.moe_router_load_balancing_type) == 1:
+            self.moe_router_load_balancing_type = self.moe_router_load_balancing_type[0]
         if self.tp_comm_overlap and not self.sequence_parallel:
             raise ValueError('Tensor parallel communication/GEMM overlap can happen only when '
                              'sequence parallelism is enabled')
@@ -871,6 +910,8 @@ class MegatronArguments(RLHFMegatronArgumentsMixin, MegatronTunerMixin):
                     'Muon optimizer does not support overlap param gather. Use dist_muon instead.')
             # Muon optimizer does not support distributed optimizer for now.
             self.use_distributed_optimizer = False
+            # compat mcore 0.17
+            self.muon_nesterov = self.muon_use_nesterov
 
     def _init_teacher_model(self):
         if self.teacher_model is None:
