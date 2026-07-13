@@ -38,6 +38,7 @@
 - 🔥optimizer_cpu_offload: 将优化器状态卸载到 CPU，例如设置：`--use_precision_aware_optimizer true --optimizer_cpu_offload true --optimizer_offload_fraction 0.7`。默认为False。
   - 该参数可以显著降低显存占用（但增加内存占用）。若global_batch_size较大，则对训练速度的影响不大。
 - 🔥optimizer_offload_fraction: 卸载到 CPU 的优化器状态所占比例。默认为1.。
+- optimizer_cuda_graph: 是否为优化器步骤启用 CUDA 计算图，传递给 Megatron 的 `--optimizer-cuda-graph`。默认为False。该参数需要"megatron-core>=0.17"。
 - use_precision_aware_optimizer: 使用 TransformerEngine 中的精度感知优化器，该优化器允许将主参数和优化器状态设置为较低精度，例如 fp16 和 fp8。
 - main_grads_dtype: 启用 use_precision_aware_optimizer 时主梯度的 dtype。可选为'fp32', 'bf16'。默认为'fp32'。
 - main_params_dtype: 启用 use_precision_aware_optimizer 时主参数的 dtype。可选为'fp32', 'fp16'。默认为'fp32'。
@@ -152,6 +153,8 @@
 - align_param_gather: 设置为True，所有 PP 阶段将同时启动参数全收集（all-gather）操作。否则，每个 PP 阶段将根据需要独立启动。默认为True。
 - 🔥sequence_parallel: 启动序列并行优化，该参数需要设置`tensor_model_parallel_size`才生效。默认为False。
 - 🔥context_parallel_size: cp数，默认为1。
+- cp_partition_mode: THD 序列行如何在上下文并行（context-parallel）ranks 之间进行划分。可选为"zigzag", "contiguous"，默认为"zigzag"。
+- sequence_packing_scheduler: 用于序列打包和动态上下文并行的调度器。可选为"dp_balanced"，"default_dynamic_cp"。dp_balanced：用于序列打包的 DP 均衡调度器。default_dynamic_cp：用于打包序列均衡的动态 CP 调度器。默认为None。
 - tp_comm_overlap: 启用张量并行通信与GEMM（通用矩阵乘法）内核的重叠（降低通信耗时）。默认为False。
 - 🔥overlap_grad_reduce: 启用DDP中grad reduce操作的重叠（降低DP通信耗时）。默认为False。
 - 🔥overlap_param_gather: 启用分布式优化器中参数all-gather的重叠（降低DP通信耗时）。默认为False。
@@ -418,7 +421,8 @@ Megatron训练参数继承自Megatron参数和基本参数（**与ms-swift共用
 - teacher_model: 教师模型的路径或模型 ID，必需参数。
 - teacher_model_type: 教师模型类型，默认为None，自动检测。
 - teacher_model_revision: 教师模型版本，默认为None。
-- teacher_model_server: 教师模型服务地址, 如：`http://localhost:8000`, 使用`swift deploy`部署的服务端计算logps。
+- teacher_model_server: 教师模型服务地址，通过 `swift deploy` 部署后用于获取 logprobs，与 `teacher_model` 互斥。支持单 URL 或多 teacher JSON（`'[{"url":"...","tags":["..."]}, ...]'`）。详见[蒸馏文档](../Instruction/Distillation.md#multi-teacher多教师路由)。
+- teacher_tag_key: 多 teacher 路由时样本匹配 teacher `tags` 的字段名，默认为 `"dataset"`。
 - offload_teacher_model: 是否将教师模型卸载到 CPU 以节省 GPU 显存。默认为False。
 
 

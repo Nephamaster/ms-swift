@@ -20,12 +20,12 @@ from swift.rl_core.grpo_algorithm import score_completions
 from swift.rl_core.resample import resample_encode_failed_inputs
 from swift.rlhf_trainers.gkd_helpers import (assemble_teacher_completion_logprobs, build_opsd_samples,
                                              build_teacher_requests, encode_teacher_view,
-                                             remap_teacher_logps_to_student_frame, should_compute_local_teacher_logps)
+                                             fetch_teacher_parsed_by_routing, remap_teacher_logps_to_student_frame,
+                                             should_compute_local_teacher_logps)
 from swift.rlhf_trainers.grpo_trainer import DataType
 from swift.rlhf_trainers.utils import (collate_to_grpo_micro_batch, encode_sample, make_reward_weights,
                                        pad_logps_back_to_batch, profiling_context, profiling_decorator,
                                        resolve_reward_funcs)
-from swift.rollout import MultiTurnScheduler, multi_turns
 from swift.template import Template
 from swift.utils import get_logger
 from .rlhf_mixin import MegatronRLHFTrainer
@@ -59,7 +59,6 @@ class MegatronGRPOTrainer(MegatronRolloutMixin, MegatronRLHFTrainer):
         self._init_grpo_params()
         self._init_rollout_engine()
         self._prepare_rewards()
-        self._prepare_scheduler()
         self.resample_data_iterator = None
 
     def prepare_model(self):
@@ -197,27 +196,6 @@ class MegatronGRPOTrainer(MegatronRolloutMixin, MegatronRLHFTrainer):
 
         assert self.reward_funcs or self.use_gym_env or self._has_teacher, \
             'reward_funcs is not set (or pass --use_gym_env true / a teacher for OPD-RL)'
-
-    def _prepare_scheduler(self):
-        """Prepare multi-turn scheduler"""
-        args = self.args
-
-        self.multi_turn_scheduler = None
-        if not hasattr(args, 'multi_turn_scheduler'):
-            return
-
-        if args.multi_turn_scheduler:
-            if isinstance(args.multi_turn_scheduler, str):
-                assert args.multi_turn_scheduler in multi_turns
-                scheduler_kwargs = {'max_turns': args.max_turns}
-                gym_env = getattr(args, 'gym_env', None)
-                if gym_env is not None:
-                    scheduler_kwargs['gym_env'] = gym_env
-                multi_turn_scheduler = multi_turns[args.multi_turn_scheduler](**scheduler_kwargs)
-                self.multi_turn_scheduler: MultiTurnScheduler = multi_turn_scheduler
-            else:
-                assert isinstance(args.multi_turn_scheduler, MultiTurnScheduler)
-                self.multi_turn_scheduler: MultiTurnScheduler = args.multi_turn_scheduler
 
     def _init_resample_data_iterator(self, train_dataset):
         """Initialize an independent data iterator for resampling.
@@ -796,18 +774,33 @@ class MegatronGRPOTrainer(MegatronRolloutMixin, MegatronRLHFTrainer):
                                                                                                       Any]]) -> None:
         """OPD-RL teacher API: fetch the sampled token's logp per response position
         (``prompt_logprobs=0``) and write it as ``teacher_per_token_logps`` (completion frame)
-        on each micro-batch's GRPOBatch. Same sampled-token semantics as HF/Ray OPD-RL."""
+        on each micro-batch's GRPOBatch. Same sampled-token semantics as HF/Ray OPD-RL.
+
+        Each sample routes to exactly one teacher by tag (single teacher = all samples);
+        results are fetched globally then sliced per micro-batch.
+        """
         requests = build_teacher_requests(total_samples, self.template)
         all_rti = [s.response_token_ids for s in total_samples]
-        parsed = self._fetch_teacher_parsed_logprobs(requests, topk=0)
+        parsed = fetch_teacher_parsed_by_routing(
+            total_samples,
+            requests,
+            self.teacher_configs,
+            self.teacher_clients,
+            gather_fn=self._gather_teacher_requests,
+            infer_fn=lambda handle, client: self._infer_teacher_requests(handle, topk=0, teacher_client=client),
+            scatter_fn=self._scatter_teacher_parsed,
+            is_main_process=self.is_main_process,
+            tag_key=self.args.teacher_tag_key)
+
         offset = 0
         for data in mini_batch_data:
             grpo_batch: GRPOBatch = data['grpo_batch']
+            device = grpo_batch.completion_mask.device
             n = grpo_batch.completion_mask.shape[0]
             teacher_out = assemble_teacher_completion_logprobs(
                 parsed[offset:offset + n],
                 grpo_batch.completion_mask,
-                grpo_batch.completion_mask.device,
+                device,
                 response_token_ids=all_rti[offset:offset + n])
             grpo_batch.teacher_per_token_logps = teacher_out.topk_logprobs[..., 0]
             offset += n

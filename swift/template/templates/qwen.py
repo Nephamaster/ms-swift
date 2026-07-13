@@ -599,13 +599,10 @@ class Qwen3_5Template(Qwen3VLTemplate):
     image_token_id = 248056
     video_token_id = 248057
 
-    def init_env_args(self) -> None:
-        super().init_env_args()
-        if (self.padding_free and self.sequence_parallel_size <= 1 and not self.transformers_5_9):
+    def _post_encode(self, model, inputs: Dict[str, Any]) -> Dict[str, Any]:
+        if self.padding_free and self.sequence_parallel_size <= 1 and not self.transformers_5_9:
             raise RuntimeError('Qwen3.5 packing/padding_free with sequence_parallel_size=1 requires '
                                f'transformers>=5.9.0 (current: {self.transformers_version}). ')
-
-    def _post_encode(self, model, inputs: Dict[str, Any]) -> Dict[str, Any]:
         return Qwen2VLTemplate._post_encode(self, model, inputs)
 
     def _swift_prepare_inputs(self, inputs: StdTemplateInputs):
@@ -687,6 +684,16 @@ register_template(
         MLLMTemplateType.qwen3_vl_reranker, default_system=qwen3_reranker_system, template_cls=Qwen3VLRerankerTemplate))
 
 
+# ref: trim to hop multiple so WhisperFeatureExtractor matches native HF (floor frames);
+# vLLM pad_to_hop_length becomes no-op on pre-trimmed waveforms (GRPO train/rollout align).
+def trim_audio_to_hop_length(x: np.ndarray, hop_length: int) -> np.ndarray:
+    length = x.shape[-1]
+    aligned = (length // hop_length) * hop_length
+    if 0 < aligned < length:
+        x = x[..., :aligned]
+    return x
+
+
 class Qwen2_5OmniTemplate(Qwen2_5VLTemplate):
     version = 'omni_v2_5'
     placeholder_tokens = ['<|IMAGE|>', '<|AUDIO|>', '<|VIDEO|>']
@@ -711,6 +718,30 @@ class Qwen2_5OmniTemplate(Qwen2_5VLTemplate):
         self.position_id_per_seconds = default['videos_kwargs']['position_id_per_seconds']
         self.use_audio_in_video = get_env_args('use_audio_in_video', bool, False)
         self.sampling_rate = get_env_args('sampling_rate', int, self.processor.feature_extractor.sampling_rate)
+
+    def _trim_omni_v3_audios(self, audios):
+        """Trim waveforms to hop-length multiple (omni_v3 only). Matches native HF floor framing."""
+        if self.version != 'omni_v3' or not audios:
+            return audios
+        hop = self.processor.feature_extractor.hop_length
+        trimmed = []
+        for audio in audios:
+            if isinstance(audio, tuple):
+                # train: (wav, 'video'); vllm standalone: (wav, sr)
+                trimmed.append((trim_audio_to_hop_length(audio[0], hop), audio[1]))
+            elif isinstance(audio, np.ndarray):
+                trimmed.append(trim_audio_to_hop_length(audio, hop))
+            else:
+                raise TypeError(f'unexpected audio type {type(audio)!r}; expected ndarray or (ndarray, meta)')
+        return trimmed
+
+    def _encode_truncated(self, inputs: StdTemplateInputs):
+        encoded = super()._encode_truncated(inputs)
+        if self.mode == 'vllm' and inputs.audios:
+            inputs.audios = self._trim_omni_v3_audios(inputs.audios)
+            if 'audios' in encoded:
+                encoded['audios'] = inputs.audios
+        return encoded
 
     def replace_tag(self, media_type: Literal['image', 'video', 'audio'], index: int,
                     inputs: StdTemplateInputs) -> List[Context]:
@@ -819,6 +850,7 @@ class Qwen2_5OmniTemplate(Qwen2_5VLTemplate):
 
     def _encode(self, inputs: StdTemplateInputs) -> Dict[str, Any]:
         encoded = Template._encode(self, inputs)
+        inputs.audios = self._trim_omni_v3_audios(inputs.audios)
         processor = self.processor
         video_audios_mask = []
         for i, audio in enumerate(inputs.audios):
@@ -828,13 +860,12 @@ class Qwen2_5OmniTemplate(Qwen2_5VLTemplate):
             else:
                 video_audios_mask.append(False)
         video_audios_mask = torch.tensor(video_audios_mask)
-        do_resize = self.version == 'omni_v3'
         media_inputs = processor(
             text='',
             audio=inputs.audios or None,
             images=inputs.images or None,
             videos=inputs.videos or None,
-            do_resize=do_resize,
+            do_resize=False,
             return_tensors='pt')
         media_inputs.pop('input_ids')
         media_inputs.pop('attention_mask')
@@ -1202,10 +1233,18 @@ class Qwen3TTSTemplate(Template):
             inputs.pop('ref_mels')
             inputs['speaker_embedding'] = speaker_embedding
         outputs = model(**inputs)
-        talker_loss = outputs.loss
+        logits = outputs.logits
+        shift_labels = inputs['codec_0_labels'][:, 1:].contiguous()
+        talker_loss = F.cross_entropy(
+            logits.reshape(-1, logits.shape[-1]).float(),
+            shift_labels.reshape(-1).to(logits.device),
+            ignore_index=-100,
+        )
         sub_talker_loss = getattr(outputs, 'sub_talker_loss', None)
         if sub_talker_loss is not None:
-            outputs.loss = talker_loss + 0.3 * sub_talker_loss
+            outputs['loss'] = talker_loss + 0.3 * sub_talker_loss
+        else:
+            outputs['loss'] = talker_loss
         return outputs
 
     def save_callback(self, model, output_dir):

@@ -341,6 +341,8 @@ class Template(ProcessorMixin):
                     i += 1
                 tool_call_msgs = messages[i_start:i + 1]
                 tool_content = agent_template._format_tool_calls(tool_call_msgs)
+                pre_message = messages[i_start - 1] if i_start > 0 else None
+                tool_content = agent_template._add_tool_call_prefix(tool_content, pre_message)
                 merged_message = {'role': 'assistant', 'content': tool_content}
                 # Preserve loss/loss_scale fields from the first tool_call message.
                 for msg in tool_call_msgs:
@@ -366,7 +368,6 @@ class Template(ProcessorMixin):
         inputs: StdTemplateInputs,
     ) -> None:
         self._preprocess_tools(inputs)
-        self._preprocess_tool_call(inputs)
         if self.model_meta.is_multimodal:
             self._replace_image_tags(inputs)
             self._replace_start_image_tags(inputs)
@@ -811,8 +812,12 @@ class Template(ProcessorMixin):
 
     @staticmethod
     def _save_pil_image(image: Image.Image) -> str:
+        # `Image.tobytes()` only returns the flattened pixel stream, without mode or shape.
+        # Include them in the cache key so images that share pixel bytes but differ in
+        # mode/size do not collide onto the same cached file.
         img_bytes = image.tobytes()
-        img_hash = hashlib.sha256(img_bytes).hexdigest()
+        meta = f'{image.mode}-{image.width}x{image.height}-'.encode()
+        img_hash = hashlib.sha256(meta + img_bytes).hexdigest()
         tmp_dir = os.path.join(get_cache_dir(), 'tmp', 'images')
         logger.info_once(f'create tmp_dir: {tmp_dir}')
         os.makedirs(tmp_dir, exist_ok=True)
@@ -925,11 +930,9 @@ class Template(ProcessorMixin):
             return self.image_placeholder
         elif media_type == 'video':
             if self.mode == 'vllm':
-                # https://github.com/vllm-project/vllm/blob/main/examples/offline_inference/vision_language.py
-                from vllm.assets.video import video_get_metadata, video_to_ndarrays
+                from ..vision_utils import load_vllm_video
                 num_frames = get_env_args('vllm_num_frames', int, 16)
-                video_data = video_to_ndarrays(inputs.videos[index], num_frames)
-                video_metadatas = video_get_metadata(inputs.videos[index], num_frames)
+                video_data, video_metadatas = load_vllm_video(inputs.videos[index], num_frames)
                 inputs.videos[index] = [(video_data, video_metadatas)]
                 return self.video_placeholder
             else:
@@ -1189,12 +1192,18 @@ class Template(ProcessorMixin):
             else:
                 start_idx = -1
             for i, message in enumerate(messages):
-                if (self._is_add_non_thinking_round(messages, i, start_idx) and isinstance(message['content'], str)
-                        and not message['content'].startswith((thinking_prefix, non_thinking_prefix))):
-                    # During multi-turn SFT training/validation:
-                    # If the message has no <think> block and does not start with the non_thinking_prefix,
-                    # prepend the non_thinking_prefix to the content.
-                    message['content'] = non_thinking_prefix + message['content']
+                if not self._is_add_non_thinking_round(messages, i, start_idx):
+                    continue
+                content = message['content']
+                # After merge, content may be a list; only process the first element.
+                if isinstance(content, list):
+                    _add_prefix = content and isinstance(content[0], str) and not content[0].startswith(
+                        (thinking_prefix, non_thinking_prefix))
+                    if _add_prefix:
+                        content[0] = non_thinking_prefix + content[0]
+                elif isinstance(content, str):
+                    if not content.startswith((thinking_prefix, non_thinking_prefix)):
+                        message['content'] = non_thinking_prefix + content
 
     def _remove_thinking_content(self, content: str, thinking_suffix='</think>') -> str:
         content = content.split(thinking_suffix)[-1].strip()
@@ -1206,8 +1215,13 @@ class Template(ProcessorMixin):
         last_user_round = get_last_user_round(messages)
         for i, message in enumerate(messages):
             # Delete the content before '</think>' in all assistant turns except the last round.
-            if message['role'] == 'assistant' and isinstance(message['content'], str) and i < last_user_round:
-                message['content'] = self._remove_thinking_content(message['content'])
+            if message['role'] == 'assistant' and i < last_user_round:
+                content = message['content']
+                # After merge, content may be a list; only process the first element.
+                if isinstance(content, list) and content and isinstance(content[0], str):
+                    content[0] = self._remove_thinking_content(content[0])
+                elif isinstance(content, str):
+                    message['content'] = self._remove_thinking_content(content)
 
     def _swift_prepare_inputs(self, inputs: StdTemplateInputs):
         """
@@ -1227,6 +1241,7 @@ class Template(ProcessorMixin):
         Returns:
             None. The input messages list is updated in-place.
         """
+        self._preprocess_tool_call(inputs)
         messages = inputs.messages
         if len(messages) < 2:
             return

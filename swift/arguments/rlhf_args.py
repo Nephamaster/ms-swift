@@ -84,7 +84,8 @@ class TeacherModelArguments:
         metadata={
             'help':
             'URL of the teacher model server (e.g., http://localhost:8000). '
-            'When set, teacher logprobs are fetched via API instead of loading a local model.'
+            'When set, teacher logprobs are fetched via API instead of loading a local model. '
+            'Supports multi-teacher via JSON list of {url, tags}.'
         })
     offload_teacher_model: bool = False
 
@@ -302,7 +303,7 @@ class RLHFArguments(TeacherModelArguments, GRPOArguments, PPOArguments, RewardMo
                 # Avoid padding labels during the model's forward pass in multimodal models.
                 # Some multimodal models do not expand the image pad token.
                 self.loss_scale = 'default'
-            elif self.rlhf_type == 'grpo':
+            elif self.rlhf_type in ('grpo', 'gkd'):
                 if self.multi_turn_scheduler:
                     self.loss_scale = 'default'
                 else:
@@ -391,6 +392,8 @@ class RLHFArguments(TeacherModelArguments, GRPOArguments, PPOArguments, RewardMo
                 raise ValueError(f'Invalid advantage_estimator: {self.advantage_estimator}')
 
     def _check_teacher(self):
+        self._teacher_use_disable_adapter = False
+
         if self.rlhf_type not in ['grpo', 'gkd']:
             if self.teacher_model is not None or self.teacher_model_server is not None:
                 logger.warning(f'teacher_model / teacher_model_server is ignored for rlhf_type={self.rlhf_type!r} '
@@ -412,8 +415,14 @@ class RLHFArguments(TeacherModelArguments, GRPOArguments, PPOArguments, RewardMo
         if self.teacher_model is not None and self.teacher_model_server is not None:
             raise ValueError('setting both `teacher_model` and `teacher_model_server` is not supported.')
 
+        # Validate teacher_model_server: accept single URL or JSON multi-teacher config.
+        if self.teacher_model_server is not None:
+            from swift.rlhf_trainers.gkd_helpers import parse_teacher_model_server
+
+            # Parse early to fail fast on invalid JSON; result is re-parsed by the trainer.
+            parse_teacher_model_server(self.teacher_model_server)
+
         # Self-distillation: teacher_model == student model
-        self._teacher_use_disable_adapter = False
         if self.teacher_model is not None and self.teacher_model == self.model:
             if self.tuner_type == 'lora':
                 logger.info('LoRA + same teacher_model: using disable_adapter() for fixed teacher (no extra model).')
@@ -426,6 +435,10 @@ class RLHFArguments(TeacherModelArguments, GRPOArguments, PPOArguments, RewardMo
     def _init_rollout(self):
         if self.rlhf_type not in rlhf_support_vllm_types:
             return
+
+        if self.use_vllm and os.getenv('SWIFT_AUDIO_LOAD_BACKEND') is None:
+            # align with vLLM audio load backend
+            os.environ['SWIFT_AUDIO_LOAD_BACKEND'] = 'soundfile_pyav'
 
         if self.vllm_mode is not None and not self.use_vllm:
             raise ValueError('vllm_mode is not supported when use_vllm is false')
@@ -641,9 +654,6 @@ class RLHFArguments(TeacherModelArguments, GRPOArguments, PPOArguments, RewardMo
         if is_mp() and self.use_vllm:
             raise ValueError('GKD with vLLM is not compatible with `device_map`. '
                              'Please set NPROC_PER_NODE equal to num_processes.')
-
-        if self.multi_turn_scheduler is not None:
-            raise NotImplementedError('Currently, multi_turn_scheduler is not supported for GKD.')
 
         if self.async_generate:
             raise NotImplementedError('Currently, async_generate is not supported for GKD.')

@@ -46,13 +46,17 @@ class RLHFMegatronArgumentsMixin:
     teacher_model: Optional[str] = field(default=None)
     teacher_model_type: Optional[str] = field(default=None)
     teacher_model_revision: Optional[str] = field(default=None)
+    _teacher_use_disable_adapter: bool = False
     teacher_model_server: Optional[str] = field(
         default=None,
         metadata={
             'help':
             'URL of the teacher model server (e.g., http://localhost:8000). '
-            'When set, teacher logprobs are fetched via API instead of loading a local model.'
+            'When set, teacher logprobs are fetched via API instead of loading a local model. '
+            'Supports multi-teacher via JSON.'
         })
+    teacher_tag_key: str = field(
+        default='dataset', metadata={'help': 'Column name for multi-teacher routing. Default "dataset".'})
     gkd_logits_topk: Optional[int] = None
     lmbda: float = 0.5  # On-policy probability: with prob lmbda, use student-generated responses
     seq_kd: bool = False  # Deprecated
@@ -249,6 +253,9 @@ class RLHFMegatronArgumentsMixin:
 
         if self.rlhf_type in ['grpo', 'gkd']:
             self.vllm_engine_kwargs = json_parse_to_dict(self.vllm_engine_kwargs)
+            if self.use_vllm and os.getenv('SWIFT_AUDIO_LOAD_BACKEND') is None:
+                # align with vLLM audio load backend
+                os.environ['SWIFT_AUDIO_LOAD_BACKEND'] = 'soundfile_pyav'
 
     @staticmethod
     def resolve_generation_batch_size(
@@ -349,12 +356,18 @@ class RLHFMegatronArgumentsMixin:
         if self.use_ray and self.teacher_model_server is not None:
             raise ValueError('teacher_model_server is not supported with use_ray')
 
+        # Validate teacher_model_server: accept single URL or JSON multi-teacher config.
+        if self.teacher_model_server is not None:
+            from swift.rlhf_trainers.gkd_helpers import parse_teacher_model_server
+            parse_teacher_model_server(self.teacher_model_server)
+
         self._teacher_use_disable_adapter = False
         if self.teacher_model is not None and self.teacher_model == self.model:
             if self.tuner_type == 'lora':
                 logger.info('LoRA + same teacher_model: using disable_adapter() for fixed teacher (no extra model).')
                 self._teacher_use_disable_adapter = True
                 self.teacher_model = None
+                self.teacher_model_dir = None
             # Full training + same teacher_model: a separate frozen copy is loaded as the fixed teacher.
 
     def _check_opd_rl(self):
@@ -487,6 +500,7 @@ class MegatronArguments(RLHFMegatronArgumentsMixin, MegatronTunerMixin):
     optimizer: Literal['adam', 'sgd', 'muon', 'dist_muon'] = 'adam'
     optimizer_cpu_offload: bool = False
     optimizer_offload_fraction: float = 1.
+    optimizer_cuda_graph: bool = False
     use_precision_aware_optimizer: bool = False
     main_grads_dtype: Literal['fp32', 'bf16'] = 'fp32'
     main_params_dtype: Literal['fp32', 'fp16'] = 'fp32'
@@ -583,11 +597,16 @@ class MegatronArguments(RLHFMegatronArgumentsMixin, MegatronTunerMixin):
 
     sequence_parallel: bool = False
     context_parallel_size: int = 1
+    cp_partition_mode: Literal['zigzag', 'contiguous'] = 'zigzag'
+    sequence_packing_scheduler: Optional[Literal['dp_balanced', 'default_dynamic_cp']] = None
     tp_comm_overlap: bool = False
     overlap_grad_reduce: bool = False
     overlap_param_gather: bool = False
     overlap_param_gather_with_optimizer_step: bool = False
     align_grad_reduce: bool = True
+    # Eagerly create NCCL communicators before the training loop to avoid the lazy
+    # first-use allocation hitting the iteration-1 memory peak (Failed to CUDA calloc async).
+    nccl_comm_warmup: bool = False
     virtual_pipeline_model_parallel_size: Optional[int] = None
     microbatch_group_size_per_vp_stage: Optional[int] = None
     pipeline_model_parallel_layout: Optional[str] = None
@@ -648,7 +667,8 @@ class MegatronArguments(RLHFMegatronArgumentsMixin, MegatronTunerMixin):
     mtp_decoder_input_detach: bool = False
     mtp_shared_weights: bool = False
 
-    # mcore-bridge
+    # mcore-bridge / megatron-bridge
+    bridge_backend: Literal['mcore-bridge', 'megatron-bridge'] = 'mcore-bridge'
     model: Optional[str] = None
     model_type: Optional[str] = None
     save_safetensors: bool = True
@@ -709,7 +729,7 @@ class MegatronArguments(RLHFMegatronArgumentsMixin, MegatronTunerMixin):
             with open(args_path, 'r', encoding='utf-8') as f:
                 old_args = json.load(f)
             keys = list(f.name for f in fields(MegatronTunerMixin))
-            keys += ['mcore_model', 'task_type', 'num_labels']
+            keys += ['mcore_model', 'task_type', 'num_labels', 'bridge_backend']
             for key in keys:
                 old_value = old_args.get(key)
                 if old_value is not None:
@@ -741,10 +761,26 @@ class MegatronArguments(RLHFMegatronArgumentsMixin, MegatronTunerMixin):
 
     def _check_mcore_bridge(self):
         if self.language_model_only:
-            require_version('mcore-bridge>=1.4.3', 'Please install "mcore-bridge>=1.4.3" to use language_model_only.')
             if self.tuner_type == 'lora_llm':
                 raise ValueError('`tuner_type="lora_llm"` is not supported when `language_model_only=True`. '
                                  'Please use `tuner_type="lora"` instead.')
+
+    def _check_bridge_backend(self):
+        """Validate bridge_backend and associated constraints."""
+        if self.bridge_backend == 'megatron-bridge':
+            try:
+                import megatron.bridge
+            except ImportError:
+                raise ImportError('bridge_backend="megatron-bridge" requires the `megatron-bridge` package. '
+                                  'Install it via `pip install megatron-bridge` or use bridge_backend="mcore-bridge".')
+            if self.tuner_type != 'full':
+                raise ValueError('LoRA training is not yet supported with bridge_backend="megatron-bridge". '
+                                 'Please use bridge_backend="mcore-bridge" for LoRA, or set tuner_type="full".')
+        else:
+            require_version('mcore-bridge>=1.5.0', 'Please install mcore-bridge via `pip install mcore-bridge -U`')
+            from swift.megatron.init import _patch_mcore_bridge
+            _patch_mcore_bridge()
+            self._check_mcore_bridge()
 
     def __post_init__(self):
         if self.tuner_type != 'full':
@@ -752,7 +788,7 @@ class MegatronArguments(RLHFMegatronArgumentsMixin, MegatronTunerMixin):
         RLHFMegatronArgumentsMixin.__post_init__(self)
         MegatronTunerMixin.__post_init__(self)
         os.environ.setdefault('CUDA_DEVICE_MAX_CONNECTIONS', '1')
-        self._check_mcore_bridge()
+        self._check_bridge_backend()
         if self.recompute_granularity == 'none':
             self.recompute_granularity = None
         if self.recompute_granularity == 'selective' and self.recompute_method is not None:
@@ -773,9 +809,18 @@ class MegatronArguments(RLHFMegatronArgumentsMixin, MegatronTunerMixin):
         self.model_type = self.model_info.model_type
         self.model_dir = self.model_info.model_dir
         self.is_multimodal = self.model_meta.is_multimodal
-        self.megatron_model_meta = get_model_meta(self._get_mcore_model_type(self.model_meta))
-        if self.megatron_model_meta is None:
-            raise ValueError(f'Model: {self.model} is not supported.')
+        if self.bridge_backend == 'megatron-bridge':
+            self.megatron_model_meta = None
+            if self.is_multimodal:
+                raise ValueError('Multimodal training is not yet supported with bridge_backend="megatron-bridge". '
+                                 'Please use bridge_backend="mcore-bridge" for multimodal models.')
+            if self.task_type not in (None, 'causal_lm'):
+                raise ValueError(f'task_type={self.task_type!r} is not yet supported with '
+                                 f'bridge_backend="megatron-bridge".')
+        else:
+            self.megatron_model_meta = get_model_meta(self._get_mcore_model_type(self.model_meta))
+            if self.megatron_model_meta is None:
+                raise ValueError(f'Model: {self.model} is not supported.')
         self._init_teacher_model()
         if self.apply_wd_to_qk_layernorm and self.model_type not in {'qwen3_next', 'qwen3_5', 'qwen3_5_moe'}:
             raise ValueError('apply_wd_to_qk_layernorm is only supported for qwen3_next, qwen3_5 and qwen3_5_moe')
@@ -920,9 +965,12 @@ class MegatronArguments(RLHFMegatronArgumentsMixin, MegatronTunerMixin):
             self.teacher_model, model_type=self.teacher_model_type, use_hf=self.use_hf, hub_token=self.hub_token)
         self.teacher_model_type = self.teacher_model_info.model_type
         self.teacher_model_dir = self.teacher_model_info.model_dir
-        self.teacher_megatron_model_meta = get_model_meta(self._get_mcore_model_type(self.teacher_model_meta))
-        if self.teacher_megatron_model_meta is None:
-            raise ValueError(f'Model: {self.teacher_model} is not supported.')
+        if self.bridge_backend == 'megatron-bridge':
+            self.teacher_megatron_model_meta = None
+        else:
+            self.teacher_megatron_model_meta = get_model_meta(self._get_mcore_model_type(self.teacher_model_meta))
+            if self.teacher_megatron_model_meta is None:
+                raise ValueError(f'Model: {self.teacher_model} is not supported.')
 
     def _init_vpp_size(self):
         if self.pipeline_model_parallel_layout is not None:
@@ -1005,6 +1053,8 @@ class MegatronArguments(RLHFMegatronArgumentsMixin, MegatronTunerMixin):
             self.eval_iters = 0
 
     def _init_multimodal_full(self):
+        if not self.is_multimodal:
+            return
         visual_cls = self.megatron_model_meta.visual_cls
         if self.tuner_type == 'full' and self.is_multimodal and visual_cls is not None and not self.language_model_only:
             vision_tower = [f'visual.{vit}' for vit in getattr(visual_cls, '_vision_tower', [])]
