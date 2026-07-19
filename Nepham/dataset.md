@@ -18,16 +18,16 @@ query-response格式:
 - twnlp/csc_data
     hf_dataset_id：twnlp/csc_data
     github：https://github.com/TW-NLP/ChineseErrorCorrector
-    paper: 
+    paper:
     ```bibtex
     @misc{tian2025chineseerrorcorrector34bstateoftheartchinesespelling,
-        title={ChineseErrorCorrector3-4B: State-of-the-Art Chinese Spelling and Grammar Corrector}, 
+        title={ChineseErrorCorrector3-4B: State-of-the-Art Chinese Spelling and Grammar Corrector},
         author={Wei Tian and YuhaoZhou},
         year={2025},
         eprint={2511.17562},
         archivePrefix={arXiv},
         primaryClass={cs.CL},
-        url={https://arxiv.org/abs/2511.17562}, 
+        url={https://arxiv.org/abs/2511.17562},
     }
     ```
 

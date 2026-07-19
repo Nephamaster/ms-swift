@@ -2,8 +2,7 @@ import difflib
 import json
 import os
 import random
-from typing import List, Dict, Any
-
+from typing import Any, Dict, List
 
 INS = """请检测待纠错句子中的**中文拼写错误**。
 
@@ -37,28 +36,28 @@ INS = """请检测待纠错句子中的**中文拼写错误**。
 
 def load_raw_samples(raw_data_path: str):
     samples = []
-    with open(raw_data_path, "r", encoding="utf-8") as f:
-        if raw_data_path.endswith(".jsonl"):
+    with open(raw_data_path, 'r', encoding='utf-8') as f:
+        if raw_data_path.endswith('.jsonl'):
             for line in f:
                 if not line.strip():
                     continue
                 item = json.loads(line)
-                src = item.get("input", "").strip()
-                tgt = item.get("output", "").strip()
+                src = item.get('input', '').strip()
+                tgt = item.get('output', '').strip()
                 if src and tgt:
                     samples.append((src, tgt))
-        elif raw_data_path.endswith(".json"):
+        elif raw_data_path.endswith('.json'):
             data = json.load(f)
             for item in data:
-                src = item.get("input", "").strip()
-                tgt = item.get("output", "").strip()
+                src = item.get('input', '').strip()
+                tgt = item.get('output', '').strip()
                 if src and tgt:
                     samples.append((src, tgt))
-        elif raw_data_path.endswith(".txt"):
+        elif raw_data_path.endswith('.txt'):
             for line in f:
                 if not line.strip():
                     continue
-                parts = line.rstrip("\n").split("\t")
+                parts = line.rstrip('\n').split('\t')
                 if len(parts) < 2:
                     continue
                 src = parts[0].strip()
@@ -66,15 +65,12 @@ def load_raw_samples(raw_data_path: str):
                 if src and tgt:
                     samples.append((src, tgt))
         else:
-            raise ValueError(f"不支持的文件类型: {raw_data_path}")
+            raise ValueError(f'不支持的文件类型: {raw_data_path}')
     return samples
 
 
 def build_item(src: str, tgt: str) -> Dict[str, Any]:
-    return {
-        "src": src,
-        "tgt": tgt
-    }
+    return {'src': src, 'tgt': tgt}
 
 
 def process_dataset_with_error_ratio(
@@ -103,11 +99,11 @@ def process_dataset_with_error_ratio(
         else:
             clean_samples.append(item)
 
-    print(f"原始错误样本数: {len(error_samples)}")
-    print(f"原始正确样本数: {len(clean_samples)}")
+    print(f'原始错误样本数: {len(error_samples)}')
+    print(f'原始正确样本数: {len(clean_samples)}')
 
     if error_ratio <= 0 or error_ratio >= 1:
-        raise ValueError("error_ratio 必须在 (0, 1) 之间")
+        raise ValueError('error_ratio 必须在 (0, 1) 之间')
 
     # 目标关系：
     # error / total = error_ratio
@@ -116,7 +112,7 @@ def process_dataset_with_error_ratio(
     target_clean_for_error = int(len(error_samples) * (1 - error_ratio) / error_ratio)
     target_error_for_clean = int(len(clean_samples) * error_ratio / (1 - error_ratio))
 
-    if strategy == "downsample":
+    if strategy == 'downsample':
         # 尽量不重复采样，按较小一侧裁剪
         target_error = min(len(error_samples), target_error_for_clean)
         target_clean = int(target_error * (1 - error_ratio) / error_ratio)
@@ -128,7 +124,7 @@ def process_dataset_with_error_ratio(
         sampled_error = random.sample(error_samples, target_error)
         sampled_clean = random.sample(clean_samples, target_clean)
 
-    elif strategy == "oversample":
+    elif strategy == 'oversample':
         # 少的一类通过重复采样补足
         if target_clean_for_error <= len(clean_samples):
             sampled_error = error_samples
@@ -154,37 +150,35 @@ def process_dataset_with_error_ratio(
     processed_data = sampled_error + sampled_clean
     random.shuffle(processed_data)
 
-    final_error = sum(1 for x in processed_data if x["src"] != x["tgt"])
+    final_error = sum(1 for x in processed_data if x['src'] != x['tgt'])
     final_total = len(processed_data)
-    print(f"最终总样本数: {final_total}")
-    print(f"最终错误样本数: {final_error}")
-    print(f"最终错误样本比例: {final_error / final_total:.4f}")
+    print(f'最终总样本数: {final_total}')
+    print(f'最终错误样本数: {final_error}')
+    print(f'最终错误样本比例: {final_error / final_total:.4f}')
 
     return processed_data
 
 
-if __name__ == "__main__":
-    data1 = process_dataset_with_error_ratio(
-        "/share/project/wuhaiming/spaces/LlamaFactory/data/twnlp_csc.jsonl",
-        # error_ratio=0.99,
-        # seed=42,
-        # strategy="downsample"
-    )
+if __name__ == '__main__':
+    data1 = process_dataset_with_error_ratio('/share/project/wuhaiming/spaces/LlamaFactory/data/twnlp_csc.jsonl',
+                                             # error_ratio=0.99,
+                                             # seed=42,
+                                             # strategy="downsample"
+                                             )
 
-    data2 = process_dataset_with_error_ratio(
-        "/share/project/wuhaiming/spaces/ADC/data/sighan/SIGHAN-train.txt",
-        # error_ratio=0.95,
-        # seed=42,
-        # strategy="downsample"
-    )
+    data2 = process_dataset_with_error_ratio('/share/project/wuhaiming/spaces/ADC/data/sighan/SIGHAN-train.txt',
+                                             # error_ratio=0.95,
+                                             # seed=42,
+                                             # strategy="downsample"
+                                             )
 
-    all_data = data1+data2
+    all_data = data1 + data2
     # random.shuffle(all_data)
 
-    final_error = sum(1 for x in all_data if x["src"] != x["tgt"])
-    print(f"混合后总数: {len(all_data)}")
-    print(f"混合后错误比例: {final_error / len(all_data):.4f}")
+    final_error = sum(1 for x in all_data if x['src'] != x['tgt'])
+    print(f'混合后总数: {len(all_data)}')
+    print(f'混合后错误比例: {final_error / len(all_data):.4f}')
 
-    with open("../dataset/csc_mix.jsonl", "w", encoding="utf-8") as f:
+    with open('../dataset/csc_mix.jsonl', 'w', encoding='utf-8') as f:
         for item in all_data:
-            f.write(json.dumps(item, ensure_ascii=False) + "\n")
+            f.write(json.dumps(item, ensure_ascii=False) + '\n')

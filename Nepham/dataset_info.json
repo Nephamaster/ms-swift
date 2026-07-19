@@ -17,11 +17,11 @@
     },
     {
         "dataset_name": "csc_mix",
-        "dataset_path": "dataset/csc_mix.jsonl",
-        "columns": {
-            "src": "query",
-            "tgt": "response"
-        }
+        "dataset_path": "/share/project/wuhaiming/spaces/CLLM/data/processed/sft/csc_mix.jsonl"
+    },
+    {
+        "dataset_name": "cscd_dev",
+        "dataset_path": "/share/project/wuhaiming/spaces/CLLM/data/processed/sft/cscd_dev.jsonl"
     },
     {
         "dataset_name": "csc_train",
@@ -36,7 +36,11 @@
         "dataset_path": "dataset/SFT.jsonl"
     },
     {
-        "dataset_name": "tiger_pt_zh",
-        "dataset_path": "dataset/tiger_pt_zh_dataflow.jsonl"
+        "dataset_name": "tiger_pt_zh_train",
+        "dataset_path": "/share/project/wuhaiming/spaces/CLLM/data/processed/cpt/tiger_pt_zh_train.jsonl"
+    },
+    {
+        "dataset_name": "tiger_pt_zh_dev",
+        "dataset_path": "/share/project/wuhaiming/spaces/CLLM/data/processed/cpt/tiger_pt_zh_dev.jsonl"
     }
 ]
