@@ -27,7 +27,7 @@ swift pt \
     --learning_rate 1e-5 \
     --max_steps 30000 \
     --per_device_train_batch_size 8 \
-    --per_device_eval_batch_size 4 \
+    --per_device_eval_batch_size 8 \
     --gradient_accumulation_steps 1 \
     --max_length 1024 \
     --packing false \

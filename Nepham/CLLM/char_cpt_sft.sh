@@ -1,10 +1,10 @@
 set -euo pipefail
 
-MODEL=/share/project/wuhaiming/spaces/CLLM/models/Qwen3-4B-Base-Char-PT-ckpt1500
-TRAIN=/share/project/wuhaiming/spaces/CLLM/data/processed/sft/csc_mix.jsonl
+MODEL=/share/project/wuhaiming/spaces/CLLM/models/Qwen3-4B-Base-Char-PT
+TRAIN=/share/project/wuhaiming/spaces/CLLM/data/processed/sft/csc_mix_dedup.jsonl
 DEV=/share/project/wuhaiming/spaces/CLLM/data/processed/sft/cscd_dev.jsonl
 OUT=/share/project/wuhaiming/spaces/CLLM/adapters/char-cpt-sft
-CKPT=/share/project/wuhaiming/spaces/CLLM/adapters/char-cpt-sft/v0-20260721-154610/checkpoint-1000
+CKPT=/share/project/wuhaiming/spaces/CLLM/adapters/char-cpt-sft/v6-20260724-235139/checkpoint-23500
 
 CUDA_VISIBLE_DEVICES=0,1,2,3 \
 NPROC_PER_NODE=4  \
@@ -12,14 +12,21 @@ swift sft \
     --model "$MODEL" \
     --model_type qwen3 \
     --template qwen3 \
+    --use_chat_template false \
+    --loss_scale default \
+    --disable_ignore_empty_think true \
+    --add_non_thinking_prefix false \
+    --truncation_strategy delete \
     --check_model false \
     --dataset "$TRAIN" \
     --val_dataset "$DEV" \
+    --dataset_shuffle true \
+    --train_dataloader_shuffle true \
+    --val_dataset_shuffle false \
     --dataset_num_proc 64 \
-    --load_from_cache_file true \
+    --load_from_cache_file false \
     --tuner_type lora \
     --torch_dtype bfloat16 \
-    --loss_scale default \
     --target_modules all-linear \
     --lora_rank 16 \
     --lora_alpha 32 \
@@ -30,6 +37,7 @@ swift sft \
     --per_device_eval_batch_size 8 \
     --gradient_accumulation_steps 1 \
     --max_length 512 \
+    --max_new_tokens 256 \
     --packing false \
     --optim adamw_torch \
     --adam_beta1 0.9 \
@@ -37,7 +45,7 @@ swift sft \
     --adam_epsilon 1e-8 \
     --weight_decay 0.0 \
     --lr_scheduler_type linear \
-    --warmup_ratio 0.1 \
+    --warmup_ratio 0.05 \
     --gradient_checkpointing true \
     --eval_strategy steps \
     --save_strategy steps \
