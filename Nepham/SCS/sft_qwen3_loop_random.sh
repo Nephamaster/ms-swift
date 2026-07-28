@@ -6,19 +6,19 @@ set -euo pipefail
 # 固定配置
 # ============================================================
 
-MODEL=/share/project/wuhaiming/data/models/Qwen3-8B-Base
+MODEL=/share/project/wuhaiming/data/models/Llama-3.1-8B
 
-DATA_ROOT=/share/project/wuhaiming/spaces/scs/data/sft/random
+DATA_ROOT=/share/project/wuhaiming/spaces/scs/data/sft/random_llama
 OUTPUT_ROOT=/share/project/wuhaiming/spaces/scs/output/adapters
-LOG_ROOT=/share/project/wuhaiming/spaces/scs/output/logs/random
+LOG_ROOT=/share/project/wuhaiming/spaces/scs/output/logs/random_llama
 
 DEV=/share/project/wuhaiming/spaces/scs/data/dev/candidate_1000.jsonl
 
 START_INDEX=1
 END_INDEX=12
 
-GPU_IDS=2,3
-NPROC=2
+GPU_IDS=0,1,2,3
+NPROC=4
 
 mkdir -p "$OUTPUT_ROOT"
 mkdir -p "$LOG_ROOT"
@@ -59,7 +59,7 @@ for INDEX in $(seq "$START_INDEX" "$END_INDEX"); do
     ID=$(printf "%02d" "$INDEX")
 
     TRAIN="${DATA_ROOT}/random_${ID}.jsonl"
-    EXP_NAME="Qwen3-8B-SFT-Random-${ID}"
+    EXP_NAME="Llama-3.1-8B-SFT-Random-${ID}"
     OUT="${OUTPUT_ROOT}/${EXP_NAME}"
     LOG_FILE="${LOG_ROOT}/${EXP_NAME}.log"
     DONE_FILE="${OUT}/TRAINING_DONE"
@@ -79,7 +79,7 @@ for INDEX in $(seq "$START_INDEX" "$END_INDEX"); do
 
     # 重复执行脚本时，自动跳过已经成功完成的任务。
     # if [[ -f "$DONE_FILE" ]]; then
-    #     echo "[SKIP] random_${ID} 已完成"
+    #     echo "[SKIP] 开始训练：random_${ID} 已完成"
     #     continue
     # fi
 
@@ -94,13 +94,14 @@ for INDEX in $(seq "$START_INDEX" "$END_INDEX"); do
     START_TIME=$(date +%s)
 
     if CUDA_VISIBLE_DEVICES="$GPU_IDS" \
+       MASTER_PORT=23457 \
        NPROC_PER_NODE="$NPROC" \
        swift sft \
         --output_dir "$OUT" \
         \
         --model "$MODEL" \
-        --model_type qwen3 \
-        --template qwen3 \
+        --model_type llama \
+        --template llama3_2 \
         --check_model true \
         --torch_dtype bfloat16 \
         \
@@ -111,19 +112,20 @@ for INDEX in $(seq "$START_INDEX" "$END_INDEX"); do
         --val_dataset_shuffle false \
         --dataset_num_proc 64 \
         --load_from_cache_file true \
+        --strict false \
         \
-        --loss_scale default+ignore_empty_think \
-        --add_non_thinking_prefix true \
+        --loss_scale default \
         \
         --max_length 4096 \
-        --truncation_strategy left \
+        --truncation_strategy delete \
         --packing false \
+        --group_by_length true \
         \
         --tuner_type lora \
         --target_modules all-linear \
-        --lora_rank 16 \
-        --lora_alpha 32 \
-        --lora_dropout 0.01 \
+        --lora_rank 32 \
+        --lora_alpha 64 \
+        --lora_dropout 0.05 \
         --lora_bias none \
         \
         --learning_rate 1e-4 \
@@ -131,6 +133,8 @@ for INDEX in $(seq "$START_INDEX" "$END_INDEX"); do
         --per_device_train_batch_size 2 \
         --per_device_eval_batch_size 2 \
         --gradient_accumulation_steps 2 \
+        --average_tokens_across_devices true \
+        --gradient_checkpointing true \
         \
         --optim adamw_torch \
         --adam_beta1 0.9 \
@@ -140,16 +144,14 @@ for INDEX in $(seq "$START_INDEX" "$END_INDEX"); do
         --max_grad_norm 1.0 \
         \
         --lr_scheduler_type cosine \
-        --warmup_ratio 0.01 \
-        \
-        --gradient_checkpointing true \
+        --warmup_ratio 0.03 \
         \
         --eval_strategy steps \
         --eval_on_start true \
-        --eval_steps 100 \
+        --eval_steps 500 \
         \
         --save_strategy steps \
-        --save_steps 100 \
+        --save_steps 500 \
         --save_total_limit 5 \
         --save_only_model false \
         \

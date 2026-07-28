@@ -111,19 +111,21 @@ for INDEX in $(seq "$START_INDEX" "$END_INDEX"); do
         --val_dataset_shuffle false \
         --dataset_num_proc 64 \
         --load_from_cache_file true \
+        --strict false \
         \
-        --loss_scale default+ignore_empty_think \
+        --loss_scale default \
         --add_non_thinking_prefix true \
         \
         --max_length 4096 \
-        --truncation_strategy left \
+        --truncation_strategy delete \
         --packing false \
+        --group_by_length true \
         \
         --tuner_type lora \
         --target_modules all-linear \
-        --lora_rank 16 \
-        --lora_alpha 32 \
-        --lora_dropout 0.01 \
+        --lora_rank 32 \
+        --lora_alpha 64 \
+        --lora_dropout 0.05 \
         --lora_bias none \
         \
         --learning_rate 1e-4 \
@@ -131,6 +133,8 @@ for INDEX in $(seq "$START_INDEX" "$END_INDEX"); do
         --per_device_train_batch_size 2 \
         --per_device_eval_batch_size 2 \
         --gradient_accumulation_steps 2 \
+        --average_tokens_across_devices true \
+        --gradient_checkpointing true \
         \
         --optim adamw_torch \
         --adam_beta1 0.9 \
@@ -140,16 +144,14 @@ for INDEX in $(seq "$START_INDEX" "$END_INDEX"); do
         --max_grad_norm 1.0 \
         \
         --lr_scheduler_type cosine \
-        --warmup_ratio 0.01 \
-        \
-        --gradient_checkpointing true \
+        --warmup_ratio 0.03 \
         \
         --eval_strategy steps \
         --eval_on_start true \
-        --eval_steps 100 \
+        --eval_steps 500 \
         \
         --save_strategy steps \
-        --save_steps 100 \
+        --save_steps 500 \
         --save_total_limit 5 \
         --save_only_model false \
         \

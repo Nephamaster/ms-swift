@@ -11,7 +11,7 @@ set -euo pipefail
 
 ADAPTER_ROOT="${ADAPTER_ROOT:-/share/project/wuhaiming/spaces/scs/output/adapters}"
 
-MERGED_OUTPUT_ROOT="${MERGED_OUTPUT_ROOT:-/share/project/wuhaiming/data/models}"
+MERGED_OUTPUT_ROOT="${MERGED_OUTPUT_ROOT:-/share/project/wuhaiming/spaces/scs/output/models}"
 
 QWEN_BASE_MODEL="${QWEN_BASE_MODEL:-/share/project/wuhaiming/data/models/Qwen3-8B-Base}"
 LLAMA_BASE_MODEL="${LLAMA_BASE_MODEL:-/share/project/wuhaiming/data/models/LLama-3.1-8B}"
