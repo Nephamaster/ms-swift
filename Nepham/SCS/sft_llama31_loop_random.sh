@@ -8,17 +8,17 @@ set -euo pipefail
 
 MODEL=/share/project/wuhaiming/data/models/Llama-3.1-8B
 
-DATA_ROOT=/share/project/wuhaiming/spaces/scs/data/sft/kmeans_llama
+DATA_ROOT=/share/project/wuhaiming/spaces/scs/data/sft/random
 OUTPUT_ROOT=/share/project/wuhaiming/spaces/scs/output/adapters
-LOG_ROOT=/share/project/wuhaiming/spaces/scs/output/logs/kmeans_llama
+LOG_ROOT=/share/project/wuhaiming/spaces/scs/output/logs/random
 
 DEV=/share/project/wuhaiming/spaces/scs/data/dev/candidate_1000.jsonl
 
 START_INDEX=1
 END_INDEX=12
 
-GPU_IDS=0,1,2,3
-NPROC=4
+GPU_IDS=0,1
+NPROC=2
 
 mkdir -p "$OUTPUT_ROOT"
 mkdir -p "$LOG_ROOT"
@@ -46,27 +46,27 @@ echo "Model:       $MODEL"
 echo "Data root:   $DATA_ROOT"
 echo "Dev:         $DEV"
 echo "Output root: $OUTPUT_ROOT"
-echo "Range:       kmeans_$(printf '%02d' "$START_INDEX")"
-echo "             kmeans_$(printf '%02d' "$END_INDEX")"
+echo "Range:       random_$(printf '%02d' "$START_INDEX")"
+echo "             random_$(printf '%02d' "$END_INDEX")"
 echo "GPU:         $GPU_IDS"
 echo "============================================================"
 
 # ============================================================
-# 依次训练 kmeans_01 ～ kmeans_12
+# 依次训练 random_01 ～ random_12
 # ============================================================
 
 for INDEX in $(seq "$START_INDEX" "$END_INDEX"); do
     ID=$(printf "%02d" "$INDEX")
 
-    TRAIN="${DATA_ROOT}/kmeans_${ID}.jsonl"
-    EXP_NAME="Llama-3.1-8B-SFT-Kmeans-${ID}"
+    TRAIN="${DATA_ROOT}/random_${ID}.jsonl"
+    EXP_NAME="Llama-3.1-8B-SFT-Random-${ID}"
     OUT="${OUTPUT_ROOT}/${EXP_NAME}"
     LOG_FILE="${LOG_ROOT}/${EXP_NAME}.log"
     DONE_FILE="${OUT}/TRAINING_DONE"
 
     echo
     echo "============================================================"
-    echo "开始训练：kmeans_${ID}"
+    echo "开始训练：random_${ID}"
     echo "Train:  $TRAIN"
     echo "Output: $OUT"
     echo "Log:    $LOG_FILE"
@@ -79,7 +79,7 @@ for INDEX in $(seq "$START_INDEX" "$END_INDEX"); do
 
     # 重复执行脚本时，自动跳过已经成功完成的任务。
     # if [[ -f "$DONE_FILE" ]]; then
-    #     echo "[SKIP] 开始训练：kmeans_${ID} 已完成"
+    #     echo "[SKIP] 开始训练：random_${ID} 已完成"
     #     continue
     # fi
 
@@ -179,10 +179,10 @@ for INDEX in $(seq "$START_INDEX" "$END_INDEX"); do
             echo "completed_at=$(date '+%Y-%m-%d %H:%M:%S')"
         } > "$DONE_FILE"
 
-        echo "[DONE] kmeans_${ID} 训练完成，耗时 ${ELAPSED}s"
+        echo "[DONE] random_${ID} 训练完成，耗时 ${ELAPSED}s"
     else
         EXIT_CODE=$?
-        echo "[ERROR] kmeans_${ID} 训练失败，退出码：$EXIT_CODE"
+        echo "[ERROR] random_${ID} 训练失败，退出码：$EXIT_CODE"
         echo "[ERROR] 查看日志：$LOG_FILE"
         exit "$EXIT_CODE"
     fi
@@ -191,6 +191,6 @@ done
 echo
 echo "============================================================"
 echo "全部训练任务完成"
-echo "Adapter 范围：kmeans_01 ～ kmeans_12"
+echo "Adapter 范围：random_01 ～ random_12"
 echo "输出目录：$OUTPUT_ROOT"
 echo "============================================================"
