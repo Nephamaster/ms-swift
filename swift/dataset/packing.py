@@ -194,8 +194,8 @@ class IterablePackingDataset(IterableDataset):
             i, data = self._out_queue.get()
             if not data:
                 continue
-            res[i] = (data, len(data['input_ids']))
-        res = [data for data in res if data]
+            res[i] = data if isinstance(data, list) else [data]
+        res = [(item, len(item['input_ids'])) for group in res if group for item in group]
         last_res += res
         return last_res
 
@@ -204,6 +204,10 @@ class IterablePackingDataset(IterableDataset):
         while True:
             for x in iterable:
                 yield x
+
+    def set_epoch(self, epoch: int):
+        if hasattr(self.dataset, 'set_epoch'):
+            self.dataset.set_epoch(epoch)
 
     def __iter__(self):
         try:
