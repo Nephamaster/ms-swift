@@ -142,6 +142,9 @@
 - ddp_backend: 分布式后端，可选为'nccl', 'gloo'。默认为nccl。
 - ddp_timeout: 默认为18000000，单位为秒。
 - 🔥use_distributed_optimizer: 使用分布式优化器（即zero1）。默认为True。
+- use_megatron_fsdp: 使用 Megatron-FSDP 作为数据并行的实现（替代DDP）。默认为False。开启后会强制`use_distributed_optimizer=True`，仅支持`sgd`/`adam`优化器，且要求`CUDA_DEVICE_MAX_CONNECTIONS`大于1。
+  - 注意：尽量不要将 Megatron-FSDP 与张量并行（tensor parallelism）或上下文并行（context parallelism）同时使用，因为两者对`CUDA_DEVICE_MAX_CONNECTIONS`的最佳设置相互冲突：序列并行（sequence parallelism）需要将`CUDA_DEVICE_MAX_CONNECTIONS`设为1，而 Megatron-FSDP 则要求不能设为1（以获得更好的并行度）。
+- data_parallel_sharding_strategy: Megatron-FSDP 的数据并行切分策略。可选为'no_shard', 'optim', 'optim_grads', 'optim_grads_params'，默认为'optim_grads_params'。仅在`use_megatron_fsdp=True`时生效。
 - 🔥tensor_model_parallel_size: tp数，默认为1。
 - 🔥pipeline_model_parallel_size: pp数，默认为1。
 - 🔥decoder_first_pipeline_num_layers: decoder第一个流水线阶段所包含的Transformer层数。默认为 None，表示将Transformer层数平均分配到所有流水线阶段。
@@ -311,7 +314,7 @@ Megatron训练参数继承自Megatron参数和基本参数（**与ms-swift共用
 - add_version: 在`output_dir`上额外增加目录`'<版本号>-<时间戳>'`防止权重覆盖，默认为True。
 - 🔥create_checkpoint_symlink: 额外创建checkpoint软链接，方便书写自动化训练脚本。best_model和last_model的软链接路径分别为f'{output_dir}/best'和f'{output_dir}/last'。
 - 🔥packing: 使用`padding_free`的方式将不同长度的数据样本打包成**近似**统一长度的样本（packing能保证不对完整的序列进行切分），实现训练时各节点与进程的负载均衡（避免长文本拖慢短文本的训练速度），从而提高GPU利用率，保持显存占用稳定。当使用 `--attention_backend flash` 时，可确保packed样本内的不同序列之间相互独立，互不可见。该参数默认为`False`。注意：**packing会导致数据集样本数减少，请自行调节梯度累加数和学习率**。
-  - linear-attention的场景：Qwen3.5, Qwen3-Next也支持padding_free/packing，参考[Qwen3.5最佳实践](../BestPractices/Qwen3_5-Best-Practice.md)。
+  - linear-attention的场景：Qwen3.5, Qwen3-Next也支持padding_free/packing，参考[Qwen3.5/Qwen3.6/Qwen3.8最佳实践](../BestPractices/Qwen3_8-Best-Practice.md)。
 - packing_length: packing的长度。默认为None，设置为max_length。
 - packing_num_proc: packing的进程数，默认为1。需要注意的是，不同的`packing_num_proc`，最终形成的packed数据集是不同的。（该参数在流式packing时不生效）。通常不需要修改该值，packing速度远快于tokenize速度。
 - streaming: 流式读取并处理数据集，默认False。（流式数据集的随机并不彻底，可能导致loss波动剧烈。）

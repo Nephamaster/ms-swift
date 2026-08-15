@@ -108,6 +108,8 @@ class RolloutTrainerArgumentsMixin(VllmArguments):
             no filtering. Defaults to -1.
         top_p (float): If set to a float < 1, only the smallest set of most probable tokens with probabilities that
             add up to top_p or higher are kept for generation. Defaults to 1.0.
+        min_p (float): Minimum token probability, scaled by the probability of the most likely token. Tokens below
+            the resulting threshold are filtered out. 0.0 means no filtering. Defaults to 0.0.
         repetition_penalty (float): The parameter for repetition penalty. 1.0 means no penalty. Defaults to 1.0.
         stop_words (List[str]): A list of strings that will stop the generation when they are generated. Defaults to an
             empty list.
@@ -159,6 +161,7 @@ class RolloutTrainerArgumentsMixin(VllmArguments):
     # generation args
     top_k: int = -1
     top_p: float = 1.0
+    min_p: float = 0.0
     repetition_penalty: float = 1.
     stop_words: List[str] = field(default_factory=list)
 
@@ -446,6 +449,15 @@ class GRPOArgumentsMixin(RolloutTrainerArgumentsMixin):
     rlsd_lambda_warmup_steps: int = 0  # linear warmup of lambda from 0 to rlsd_lambda
     rlsd_lambda_decay_steps: int = 0  # linear decay of lambda to 0 over this many steps
     rlsd_negative_only: bool = False  # only reweight sequences with advantage < 0
+
+    # SDAR (Self-Distilled Agentic RL), https://arxiv.org/abs/2605.15155
+    # Confidence-gated teacher distillation auxiliary loss added to the GRPO policy loss:
+    #   L_SDAR = token-mean( sigmoid(sdar_gate_beta*(logP_T-logP_S)) * (logP_T-logP_S) ),
+    #   loss   = policy_loss + sdar_loss_coef * L_SDAR.
+    # Reuses the OPSD self-distillation teacher (teacher = current policy conditioned on a privileged
+    # per-sample ``teacher_prompt`` column). Enabled when ``sdar_loss_coef > 0``.
+    sdar_loss_coef: float = 0.0  # 0 disables SDAR; reference uses 0.1 (0.01 for ALFWorld)
+    sdar_gate_beta: float = 5.0  # sigmoid gate temperature (higher -> sharper gating)
 
     # REAL https://arxiv.org/abs/2602.05630
     real_tau: float = 0.5
