@@ -58,6 +58,7 @@ class LLMTemplateType:
     glm4_7 = 'glm4_7'
     glm5_1 = 'glm5_1'
     glm5_2 = 'glm5_2'
+    glm5_3 = 'glm5_3'
     codegeex4 = 'codegeex4'
     longwriter_llama = 'longwriter_llama'
 
@@ -79,6 +80,7 @@ class LLMTemplateType:
     baichuan_m1 = 'baichuan_m1'
     minicpm = 'minicpm'
     minicpm5 = 'minicpm5'
+    minicpm5_2b = 'minicpm5_2b'
     telechat = 'telechat'
     telechat2 = 'telechat2'
 
@@ -101,6 +103,7 @@ class LLMTemplateType:
 
     ling = 'ling'
     ling2 = 'ling2'
+    ling3 = 'ling3'
     ring2 = 'ring2'
     ring2_5 = 'ring2_5'
     yuan = 'yuan'
@@ -130,6 +133,7 @@ class LLMTemplateType:
     youtu_llm = 'youtu_llm'
     olmoe = 'olmoe'
     olmoe_0924 = 'olmoe_0924'
+    spark2_5 = 'spark2_5'
 
 
 class RMTemplateType:
@@ -137,6 +141,7 @@ class RMTemplateType:
 
 
 class MLLMTemplateType:
+    moss_vl = 'moss_vl'
     qwen_vl = 'qwen_vl'
     qwen_audio = 'qwen_audio'
     qwen2_vl = 'qwen2_vl'
@@ -152,6 +157,7 @@ class MLLMTemplateType:
     qwen3_5 = 'qwen3_5'
     qwen3_8 = 'qwen3_8'
     qwen3_5_emb = 'qwen3_5_emb'
+    wemm_embedding = 'wemm_embedding'
 
     qwen2_gme = 'qwen2_gme'
     qvq = 'qvq'
@@ -185,6 +191,7 @@ class MLLMTemplateType:
     llava_next_qwen = 'llava_next_qwen'
     llama3_llava_next = 'llama3_llava_next'
     llava_onevision1_5 = 'llava_onevision1_5'
+    llava_onevision2 = 'llava_onevision2'
 
     yi_vl = 'yi_vl'
     ernie_vl = 'ernie_vl'
@@ -215,6 +222,7 @@ class MLLMTemplateType:
     glm_edge_v = 'glm_edge_v'
     glm4v = 'glm4v'
     glm4_5v = 'glm4_5v'
+    glm5_next = 'glm5_next'
     glm_ocr = 'glm_ocr'
 
     minicpmv = 'minicpmv'
@@ -226,6 +234,7 @@ class MLLMTemplateType:
     minicpmo = 'minicpmo'
     minicpmo4_5 = 'minicpmo4_5'
 
+    deepseek_v41 = 'deepseek_v41'
     deepseek_vl = 'deepseek_vl'
     deepseek_vl2 = 'deepseek_vl2'
     deepseek_janus = 'deepseek_janus'
@@ -279,6 +288,7 @@ class MLLMTemplateType:
     step3_vl = 'step3_vl'
     minimax_m3_vl = 'minimax_m3_vl'
     muse_glimmer = 'muse_glimmer'
+    monkeyocrv2 = 'monkeyocrv2'
 
 
 class TemplateType(LLMTemplateType, MLLMTemplateType, RMTemplateType):

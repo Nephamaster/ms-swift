@@ -760,6 +760,30 @@ class Qwen3_5EmbTemplate(Qwen3_5Template):
             if last_msg['role'] != 'assistant':
                 inputs.messages.append({'role': 'assistant', 'content': ''})
 
+    def prepare_engine_kwargs(self) -> Dict[str, Any]:
+        if self.mode == 'vllm' and self.template_meta.template_type == MLLMTemplateType.qwen3_5_emb:
+            from vllm.config import PoolerConfig
+            return {
+                'hf_overrides': {
+                    'architectures': ['UEmbedForConditionalGeneration'],
+                },
+                'pooler_config': PoolerConfig(task='token_embed', pooling_type='ALL'),
+            }
+        return {}
+
+    def prepare_pooling_params(self, pooling_kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        if self.mode == 'vllm' and self.template_meta.template_type == MLLMTemplateType.qwen3_5_emb:
+            pooling_kwargs.update(task='token_embed', use_activation=False)
+        return pooling_kwargs
+
+    def extract_embedding(self, result) -> Any:
+        if self.template_meta.template_type == MLLMTemplateType.qwen3_5_emb:
+            data = result.outputs.data
+            num_eos = self.num_eos_tokens
+            embedding = torch.nn.functional.normalize(data[-(num_eos + 1)].float(), p=2, dim=-1)
+            return embedding.cpu().tolist()
+        return super().extract_embedding(result)
+
 
 register_template(
     QwenTemplateMeta(
@@ -786,6 +810,16 @@ register_template(
         default_system="Represent the user's input.",
         suffix=['<|endoftext|>'],
         template_cls=Qwen3VLEmbTemplate,
+    ))
+
+register_template(
+    QwenTemplateMeta(
+        MLLMTemplateType.wemm_embedding,
+        template_cls=Qwen3_5EmbTemplate,
+        default_system=None,
+        prompt=['<|im_start|>user\n{{QUERY}}<|im_end|>\n'],
+        suffix=['<embedding>'],
+        stop_words=['<embedding>'],
     ))
 
 
@@ -899,7 +933,13 @@ class Qwen2_5OmniTemplate(Qwen2_5VLTemplate):
             if isinstance(video, list):  # image list
                 from qwen_omni_utils import vision_process
                 video_inputs['sample_fps'] = vision_process.FPS
-            _video = fetch_video(video_inputs, **kwargs)
+            _video, sample_fps = fetch_video(video_inputs, return_video_sample_fps=True, **kwargs)
+            # Record the fps actually used when sampling frames (mirrors the VL v2_5 path). Without
+            # it the HF processor falls back to fps=1.0, so `video_second_per_grid` (temporal spacing
+            # driving TMRoPE + the audio/video token interleaving under `use_audio_in_video`) ignores
+            # the real fps. Needed in every mode: the transformers/train path recomputes it from this
+            # value in `_encode`, and vllm re-runs the HF processor on the forwarded mm_processor_kwargs.
+            inputs.mm_processor_kwargs.setdefault('fps', []).append(sample_fps)
             if isinstance(_video, torch.Tensor):
                 _video = _video.to(torch.uint8)
             inputs.videos[index] = _video
@@ -997,6 +1037,13 @@ class Qwen2_5OmniTemplate(Qwen2_5VLTemplate):
         media_inputs.pop('input_ids')
         media_inputs.pop('attention_mask')
         media_inputs = to_float_dtype(media_inputs, self.model_info.torch_dtype)
+        # The processor receives pre-sampled frames (no fps) and computes `video_second_per_grid`
+        # from the default fps=1.0. Override it with the fps actually used during sampling so the
+        # temporal position ids / audio-video token interleaving honor the user-configured fps.
+        fps = inputs.mm_processor_kwargs.get('fps')
+        if inputs.videos and fps and 'video_second_per_grid' in media_inputs:
+            video_processor = getattr(processor, 'video_processor', None) or processor.image_processor
+            media_inputs['video_second_per_grid'] = [video_processor.temporal_patch_size / tmp for tmp in fps]
         input_ids = encoded['input_ids']
         labels = encoded['labels']
         loss_scale = encoded.get('loss_scale', None)
@@ -1701,7 +1748,7 @@ class MarcoO1TemplateMeta(QwenTemplateMeta):
 你是一个经过良好训练的AI助手，你的名字是Marco-o1.由阿里国际数字商业集团的AI Business创造.
         \n## 重要！！！！！
 当你回答问题时，你的思考应该在<Thought>内完成，<Output>内输出你的结果。
-<Thought>应该尽可能是英文，但是有2个特例，一个是对原文中的引用，另一个是是数学应该使用markdown格式，<Output>内的输出需要遵循用户输入的语言。
+<Thought>应该尽可能是英文，但是有2个特例，一个是对原文中的引用，另一个是数学应该使用markdown格式，<Output>内的输出需要遵循用户输入的语言。
         """
 
 

@@ -35,7 +35,7 @@ from swift.rlhf_trainers.utils import (VLLM_LORA_INT_ID, VLLM_LORA_NAME, VLLM_LO
                                        check_vllm_version_ge, expand_vllm_param_name_aliases, finish_vllm_weight_reload,
                                        parse_prompt_logprobs, patch_vllm_load_adapter,
                                        patch_vllm_moe_model_weight_loader, profiling_context, profiling_decorator,
-                                       set_expandable_segments, vllm_supports_lora_load_inplace)
+                                       set_expandable_segments, sleep_vllm_engine, vllm_supports_lora_load_inplace)
 from swift.rlhf_trainers.vllm_client import VLLMInferClient
 from swift.rollout import MultiTurnScheduler, invoke_async_hook, multi_turns, run_multi_turn
 from swift.utils import (JsonlWriter, get_current_device, get_logger, is_last_rank, is_vllm_available, remove_response,
@@ -430,7 +430,7 @@ class MegatronRolloutMixin(BaseRolloutTrainerMixin):
             tokenizer = getattr(self, 'processing_class', None) or getattr(self.template, 'tokenizer', None)
             if isinstance(args.multi_turn_scheduler, str):
                 assert args.multi_turn_scheduler in multi_turns
-                scheduler_kwargs = {'max_turns': args.max_turns, 'tokenizer': tokenizer}
+                scheduler_kwargs = {'max_turns': args.max_turns, 'tokenizer': tokenizer, 'template': self.template}
                 gym_env = getattr(args, 'gym_env', None)
                 if gym_env is not None:
                     scheduler_kwargs['gym_env'] = gym_env
@@ -615,7 +615,14 @@ class MegatronRolloutMixin(BaseRolloutTrainerMixin):
         target_device = 'cpu' if self.args.offload_bridge else None
 
         with profiling_context(self, 'export_weights'):
-            weight_iterator = self.bridge.export_weights(self.unwrapped_models, target_device=target_device)
+            # skip_unsupported_export: RL weight sync skips weights whose Megatron->HF export is not
+            # implemented and that stay fixed in the rollout engine (e.g. frozen DeepSeek-V4.1 Engram
+            # tables). No-op for models without such weights. Guard with signature inspection so an
+            # older bridge whose export_weights predates this kwarg does not raise TypeError.
+            export_kwargs = {'target_device': target_device}
+            if 'skip_unsupported_export' in inspect.signature(self.bridge.export_weights).parameters:
+                export_kwargs['skip_unsupported_export'] = True
+            weight_iterator = self.bridge.export_weights(self.unwrapped_models, **export_kwargs)
 
         if self.rollout_enable_lora:
             vllm_param_names = self._get_vllm_param_names_for_mapping()
@@ -634,7 +641,7 @@ class MegatronRolloutMixin(BaseRolloutTrainerMixin):
                 patch_vllm_moe_model_weight_loader(llm_model)
                 llm_model.load_weights(weight_iterator)
                 _model_config = self.engine.engine.model_config
-                finish_vllm_weight_reload(llm_model, model_config=_model_config, target_device=self.device)
+                finish_vllm_weight_reload(llm_model, model_config=_model_config, target_device=self.device, strict=True)
         elif self.vllm_mode == 'server':
             self._load_weights_to_server_in_buckets(weight_iterator)
             if self.is_main_process:
@@ -708,54 +715,61 @@ class MegatronRolloutMixin(BaseRolloutTrainerMixin):
         """
         samples = self._preprocess_inputs(samples)
 
-        # Wake up engine if sleeping (colocate mode)
-        if self.vllm_mode == 'colocate' and self.engine.inner_model_executor.is_sleeping:
-            wake_up_params = inspect.signature(self.engine.engine.wake_up).parameters
-            kwargs = {'tags': ['weights']} if 'tags' in wake_up_params else {}
+        needs_weight_sync = self._step != self._last_loaded_step or self.args.sleep_level == 2
+        colocate_sleeping = (
+            self.vllm_mode == 'colocate' and self.args.sleep_level > 0 and self.engine.inner_model_executor.is_sleeping)
+        wake_up_supports_tags = (
+            colocate_sleeping and 'tags' in inspect.signature(self.engine.engine.wake_up).parameters)
+
+        if colocate_sleeping and needs_weight_sync:
+            kwargs = {'tags': ['weights']} if wake_up_supports_tags else {}
             aggressive_empty_cache()
             self.engine.engine.wake_up(**kwargs)
 
-        # Load model weights if needed
-        if self._step != self._last_loaded_step or self.args.sleep_level == 2:
+        if needs_weight_sync:
             self._move_model_to_vllm()
             self._last_loaded_step = self._step
 
         context = self.offload_context if self.enable_offload else nullcontext
         with context():
-            if (self.vllm_mode == 'colocate' and self.engine.inner_model_executor.is_sleeping
-                    and 'tags' in inspect.signature(self.engine.engine.wake_up).parameters):
-                aggressive_empty_cache()
-                set_expandable_segments(False)
-                self.engine.engine.wake_up(tags=['kv_cache'])
+            rollout_failed = False
+            try:
+                if colocate_sleeping and self.engine.inner_model_executor.is_sleeping:
+                    aggressive_empty_cache()
+                    set_expandable_segments(False)
+                    tags = ['kv_cache']
+                    if wake_up_supports_tags and not needs_weight_sync:
+                        tags.insert(0, 'weights')
+                    kwargs = {'tags': tags} if wake_up_supports_tags else {}
+                    self.engine.engine.wake_up(**kwargs)
 
-            multi_turn_scheduler = getattr(self, 'multi_turn_scheduler', None)
-            colocate_multi_turn = (
-                multi_turn_scheduler is not None and not getattr(self, 'enable_server_multi_turn', False))
+                multi_turn_scheduler = getattr(self, 'multi_turn_scheduler', None)
+                colocate_multi_turn = (
+                    multi_turn_scheduler is not None and not getattr(self, 'enable_server_multi_turn', False))
 
-            if colocate_multi_turn:
-                requests = self.samples2requests(samples)
-                invoke_async_hook(multi_turn_scheduler.on_trajectory_start(requests))
-                request_config = self._get_request_config()
-                outputs: List[RolloutOutput] = self._rollout_requests(requests, request_config)
-                outputs = run_multi_turn(
-                    requests=requests,
-                    first_turn_outputs=outputs,
-                    scheduler=multi_turn_scheduler,
-                    rollout_fn=lambda reqs, cfg: self._rollout_requests(reqs, cfg),
-                    request_config=request_config,
-                    max_turns=self.args.max_turns,
-                    gather_fn=lambda x: gather_object(x, group=self._get_rollout_group()),
-                )
-            else:
-                # Single-turn rollout (or server multi-turn handled by the engine).
-                outputs: List[RolloutOutput] = self._rollout(samples)
-
-            # Sleep to release memory
-            if self.vllm_mode == 'colocate' and self.args.sleep_level > 0:
-                self.engine.engine.reset_prefix_cache()
-                self.engine.engine.sleep(level=self.args.sleep_level)
-                aggressive_empty_cache()
-                set_expandable_segments(True)
+                if colocate_multi_turn:
+                    requests = self.samples2requests(samples)
+                    invoke_async_hook(multi_turn_scheduler.on_trajectory_start(requests))
+                    request_config = self._get_request_config()
+                    outputs: List[RolloutOutput] = self._rollout_requests(requests, request_config)
+                    outputs = run_multi_turn(
+                        requests=requests,
+                        first_turn_outputs=outputs,
+                        scheduler=multi_turn_scheduler,
+                        rollout_fn=lambda reqs, cfg: self._rollout_requests(reqs, cfg),
+                        request_config=request_config,
+                        max_turns=self.args.max_turns,
+                        gather_fn=lambda x: gather_object(x, group=self._get_rollout_group()),
+                    )
+                else:
+                    # Single-turn rollout (or server multi-turn handled by the engine).
+                    outputs: List[RolloutOutput] = self._rollout(samples)
+            except BaseException:
+                rollout_failed = True
+                raise
+            finally:
+                if self.vllm_mode == 'colocate' and self.args.sleep_level > 0:
+                    sleep_vllm_engine(self.engine.engine, self.args.sleep_level, suppress_errors=rollout_failed)
 
             samples = self._postprocess_rollout_outputs(samples, outputs)
 
