@@ -16,7 +16,7 @@ done
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 NPROC_PER_NODE=8  \
 swift pt \
-    --external_plugins Nepham/CCLLM/diagnose_eval_nan.py \
+    --external_plugins CCLLM/diagnose_eval_nan.py \
     --model "$MODEL" \
     --model_type qwen3 \
     --template qwen3 \
