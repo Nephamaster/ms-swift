@@ -1,10 +1,10 @@
 set -euo pipefail
 
-MODEL=/share/project/wuhaiming/spaces/CC-LLM/models/Qwen3-1.7B-Base-Char-PGCA-ALIGN/best
-VAL=/share/project/wuhaiming/spaces/CC-LLM/data/full_cpt/validation/validation.jsonl
+MODEL=/share/project/wuhaiming/spaces/CC-LLM/models/Qwen3-1.7B-Base-Char-PGCA-ALIGN/v4-20260923-131904/checkpoint-6289
+VAL=/share/project/wuhaiming/spaces/CC-LLM/data/corpus/runs/phase2/phase2-10b-default-6d14a3c4e453/final/ms_swift/validation/validation-00000.jsonl
 OUT=/share/project/wuhaiming/spaces/CC-LLM/models/Qwen3-1.7B-Base-Char-PGCA-ALIGN-CPT/
-TRAIN_DIR=/share/project/wuhaiming/spaces/CC-LLM/data/full_cpt/final
-TRAIN_FILES=("$TRAIN_DIR"/train-{00000..00017}.jsonl)
+TRAIN_DIR=/share/project/wuhaiming/spaces/CC-LLM/data/corpus/runs/phase2/phase2-10b-default-6d14a3c4e453/final/ms_swift/train
+TRAIN_FILES=("$TRAIN_DIR"/train-{00000..00057}.jsonl)
 
 for file in "${TRAIN_FILES[@]}"; do
     [[ -f "$file" ]] || {
@@ -13,8 +13,8 @@ for file in "${TRAIN_FILES[@]}"; do
     }
 done
 
-CUDA_VISIBLE_DEVICES=4,5,6,7 \
-NPROC_PER_NODE=4  \
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+NPROC_PER_NODE=8  \
 swift pt \
     --model "$MODEL" \
     --model_type qwen3 \
@@ -23,7 +23,7 @@ swift pt \
     --dataset "${TRAIN_FILES[@]}" \
     --val_dataset "$VAL" \
     --truncation_strategy split \
-    --dataset_num_proc 32 \
+    --dataset_num_proc 8 \
     --load_from_cache_file false \
     --tuner_type full \
     --torch_dtype bfloat16 \

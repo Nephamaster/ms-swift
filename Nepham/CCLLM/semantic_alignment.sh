@@ -1,10 +1,10 @@
 set -euo pipefail
 
 MODEL=/share/project/wuhaiming/spaces/CC-LLM/models/Qwen3-1.7B-Base-Char-PGCA
-VAL=/share/project/wuhaiming/spaces/CC-LLM/data/semantic_alignment/validation/validation.jsonl
+VAL=/share/project/wuhaiming/spaces/CC-LLM/data/corpus/runs/phase1/phase1-1b-default-c97f9387391d/final/ms_swift/validation/validation-00000.jsonl
 OUT=/share/project/wuhaiming/spaces/CC-LLM/models/Qwen3-1.7B-Base-Char-PGCA-ALIGN/
-TRAIN_DIR=/share/project/wuhaiming/spaces/CC-LLM/data/semantic_alignment/final
-TRAIN_FILES=("$TRAIN_DIR"/train-{00000..00017}.jsonl)
+TRAIN_DIR=/share/project/wuhaiming/spaces/CC-LLM/data/corpus/runs/phase1/phase1-1b-default-c97f9387391d/final/ms_swift/train
+TRAIN_FILES=("$TRAIN_DIR"/train-{00000..00005}.jsonl)
 
 for file in "${TRAIN_FILES[@]}"; do
     [[ -f "$file" ]] || {
@@ -13,9 +13,10 @@ for file in "${TRAIN_FILES[@]}"; do
     }
 done
 
-CUDA_VISIBLE_DEVICES=4,5,6,7 \
-NPROC_PER_NODE=4  \
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+NPROC_PER_NODE=8  \
 swift pt \
+    --external_plugins Nepham/CCLLM/diagnose_eval_nan.py \
     --model "$MODEL" \
     --model_type qwen3 \
     --template qwen3 \
@@ -24,16 +25,16 @@ swift pt \
     --val_dataset "$VAL" \
     --truncation_strategy split \
     --dataset_num_proc 32 \
-    --load_from_cache_file true \
+    --load_from_cache_file false \
     --tuner_type full \
     --torch_dtype bfloat16 \
-    --trainable_parameters model.embed_tokens lm_head \
-    --freeze_parameters_ratio 1 \
-    --learning_rate 7e-5 \
+    --freeze_parameters_ratio 0 \
+    --freeze_parameters_regex '(^model\.layers\.[0-9]+\.pgca_attn\.|^model\.feature_memory_builder\.feature_embedding\.)' \
+    --learning_rate 2e-5 \
     --num_train_epochs 1 \
-    --per_device_train_batch_size 4 \
+    --per_device_train_batch_size 1 \
     --per_device_eval_batch_size 1 \
-    --gradient_accumulation_steps 4 \
+    --gradient_accumulation_steps 8 \
     --max_length 2048 \
     --packing false \
     --optim adamw_torch_fused \
@@ -46,6 +47,8 @@ swift pt \
     --warmup_ratio 0.03 \
     --logging_steps 10 \
     --gradient_checkpointing true \
+    --eval_on_start true \
+    --logging_nan_inf_filter false \
     --eval_strategy steps \
     --save_strategy steps \
     --eval_steps 500 \

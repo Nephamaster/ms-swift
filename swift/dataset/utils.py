@@ -6,7 +6,7 @@ import tempfile
 from datasets import Dataset as HfDataset
 from modelscope.hub.utils.utils import get_cache_dir
 from torch.utils.data import Dataset
-from typing import Any, Callable, Dict, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from swift.template import MaxLengthError, Template
 from swift.utils import get_logger
@@ -119,12 +119,21 @@ class LazyLLMDataset(Dataset):
 
 class EncodePreprocessor(RowPreprocessor):
 
+    # Encoded caches written before filtering may contain rows without prediction targets.
+    cache_format_version = f'{RowPreprocessor.cache_format_version}-encode-v1'
+
     def __init__(self, template: 'Template'):
         super().__init__()
         self.template = template
 
-    def preprocess(self, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        return self.template.encode(row, return_length=True)
+    def preprocess(self, row: Dict[str, Any]) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
+        encoded = self.template.encode(row, return_length=True)
+        if self.template.task_type != 'causal_lm' or self.template.truncation_strategy != 'split':
+            return encoded
+
+        # Causal loss shifts labels, so the first token cannot provide supervision.
+        rows = encoded if isinstance(encoded, list) else [encoded]
+        return [item for item in rows if any(label != -100 for label in item['labels'][1:])]
 
 
 class AddLengthPreprocessor(EncodePreprocessor):
