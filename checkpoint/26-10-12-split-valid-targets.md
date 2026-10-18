@@ -83,3 +83,25 @@ python -B -m unittest discover -s tests/general -p test_eval_nan_diagnostic.py -
 ```
 
 没有远端模型前向结果前，本次新增属于诊断能力，不是已验证的 NaN 修复。
+
+## 14:15 启动日志：确认异常 batch 与实际加载源码
+
+依据 `semantic_alignment_20261012_141549.log`：
+
+- 插件路径已修正，成功加载；启动命令使用 `load_from_cache_file=false`，Map 完成。
+- 训练数据由 543894 条原始记录切成 804890 条，验证数据由 566 条切成 852 条；两者
+  `min_length=1`。日志中的 `Dataset filtered` 是条数变化的通用提示，不代表有效目标过滤已经执行。
+- 启动验证约进行到 61/107 时，rank 3 在 global_step=0 捕获 NaN。labels 为 `[1, 1]`，
+  有效 shifted targets 为 0，logits 为 `[1, 1, 154019]` 且无非有限值，模型返回的 loss 为 NaN。
+- 该进程报告 `swift_version=4.4.2`，实际加载 `env/lib/python3.12/site-packages/swift/dataset/utils.py`；
+  `preprocessor_source` 仍只有 `return self.template.encode(row, return_length=True)`。
+  因此该次运行确实没有执行此前源码中的有效目标过滤。这是进程快照，不能用于断言远端仓库当前版本。
+
+这次捕获的 batch 已确认零监督目标，且旧预处理函数绕过了此前修复；仍未证明所有历史 NaN
+均只有这一原因，也未完成补丁生效后的完整验证。
+
+`Nepham/CCLLM/apply_nan_filter_patch.py` 可由远端训练环境的 Python 执行，将仓库中已修改的
+单个方法同步到实际安装文件，保留其他实现和包版本，并写入 `.before-nan-filter` 备份。
+本地使用旧方法的最小源码样本验证了 6 个行为案例、重复应用幂等性和相邻类保持不变，全部通过；
+没有修改本地或远端已安装包。该工具不迁移缓存版本，应用后首次运行必须使用
+`load_from_cache_file=false`，预导出的 cached_dataset 仍需重新生成。

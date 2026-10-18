@@ -1,6 +1,6 @@
 set -euo pipefail
 
-MODEL=/share/project/wuhaiming/spaces/CC-LLM/models/Qwen3-1.7B-Base-Char-PGCA-ALIGN/v4-20260923-131904/checkpoint-6289
+MODEL=/share/project/wuhaiming/spaces/CC-LLM/models/Qwen3-1.7B-Base-Char-PGCA-ALIGN/v10-20261012-151834/checkpoint-10000
 VAL=/share/project/wuhaiming/spaces/CC-LLM/data/corpus/runs/phase2/phase2-10b-default-6d14a3c4e453/final/ms_swift/validation/validation-00000.jsonl
 OUT=/share/project/wuhaiming/spaces/CC-LLM/models/Qwen3-1.7B-Base-Char-PGCA-ALIGN-CPT/
 TRAIN_DIR=/share/project/wuhaiming/spaces/CC-LLM/data/corpus/runs/phase2/phase2-10b-default-6d14a3c4e453/final/ms_swift/train
@@ -27,12 +27,12 @@ swift pt \
     --load_from_cache_file false \
     --tuner_type full \
     --torch_dtype bfloat16 \
-    --learning_rate 1e-5 \
+    --learning_rate 2e-5 \
     --num_train_epochs 1 \
     --per_device_train_batch_size 1 \
     --per_device_eval_batch_size 1 \
     --gradient_accumulation_steps 8 \
-    --max_length 2048 \
+    --max_length 4096 \
     --packing false \
     --optim adamw_torch_fused \
     --adam_beta1 0.9 \

@@ -16,7 +16,6 @@ done
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 NPROC_PER_NODE=8  \
 swift pt \
-    --external_plugins CCLLM/diagnose_eval_nan.py \
     --model "$MODEL" \
     --model_type qwen3 \
     --template qwen3 \
@@ -25,7 +24,7 @@ swift pt \
     --val_dataset "$VAL" \
     --truncation_strategy split \
     --dataset_num_proc 32 \
-    --load_from_cache_file false \
+    --load_from_cache_file true \
     --tuner_type full \
     --torch_dtype bfloat16 \
     --freeze_parameters_ratio 0 \
