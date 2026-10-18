@@ -18,6 +18,7 @@ NPROC_PER_NODE=8  \
 swift pt \
     --model "$MODEL" \
     --model_type qwen3 \
+    --torch_dtype bfloat16 \
     --template qwen3 \
     --check_model false \
     --dataset "${TRAIN_FILES[@]}" \
@@ -26,7 +27,7 @@ swift pt \
     --dataset_num_proc 32 \
     --load_from_cache_file true \
     --tuner_type full \
-    --torch_dtype bfloat16 \
+    --model_kwargs '{"pgca_enabled": false}' \
     --freeze_parameters_ratio 0 \
     --freeze_parameters_regex '(^model\.layers\.[0-9]+\.pgca_attn\.|^model\.feature_memory_builder\.feature_embedding\.)' \
     --learning_rate 2e-5 \

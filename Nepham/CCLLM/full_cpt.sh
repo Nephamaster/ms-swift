@@ -1,6 +1,6 @@
 set -euo pipefail
 
-MODEL=/share/project/wuhaiming/spaces/CC-LLM/models/Qwen3-1.7B-Base-Char-PGCA-ALIGN/v10-20261012-151834/checkpoint-10000
+MODEL=/share/project/wuhaiming/spaces/CC-LLM/models/Qwen3-1.7B-Base-Char-PGCA-ALIGN/
 VAL=/share/project/wuhaiming/spaces/CC-LLM/data/corpus/runs/phase2/phase2-10b-default-6d14a3c4e453/final/ms_swift/validation/validation-00000.jsonl
 OUT=/share/project/wuhaiming/spaces/CC-LLM/models/Qwen3-1.7B-Base-Char-PGCA-ALIGN-CPT/
 TRAIN_DIR=/share/project/wuhaiming/spaces/CC-LLM/data/corpus/runs/phase2/phase2-10b-default-6d14a3c4e453/final/ms_swift/train
@@ -26,6 +26,8 @@ swift pt \
     --dataset_num_proc 8 \
     --load_from_cache_file false \
     --tuner_type full \
+    --model_kwargs '{"pgca_enabled": true}' \
+    --freeze_parameters_ratio 0 \
     --torch_dtype bfloat16 \
     --learning_rate 2e-5 \
     --num_train_epochs 1 \
